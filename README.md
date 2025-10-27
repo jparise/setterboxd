@@ -15,11 +15,27 @@ Perfect for cinephiles who want to explore filmographies systematically or disco
 
 **Prerequisites:** Python 3.11+
 
-**First-time setup:**
+**Installation options:**
+
+**Option 1: Using `uv` (recommended)** - automatically handles dependencies
+
+```bash
+# Install uv if you don't have it: https://docs.astral.sh/uv/
+# Clone or download this repository
+cd setterboxd
+
+# Download IMDb data and build database (~1GB download, takes 2-5 minutes)
+uv run setterboxd.py --rebuild
+```
+
+**Option 2: Using Python directly** - requires manual dependency installation
 
 ```bash
 # Clone or download this repository
 cd setterboxd
+
+# Install dependencies
+pip install pandas rich
 
 # Download IMDb data and build database (~1GB download, takes 2-5 minutes)
 python setterboxd.py --rebuild
@@ -34,6 +50,10 @@ python setterboxd.py --rebuild
 **Run the analysis:**
 
 ```bash
+# With uv:
+uv run setterboxd.py watched.csv
+
+# Or with Python:
 python setterboxd.py watched.csv
 ```
 
@@ -41,34 +61,36 @@ This shows directors and actors where you've seen at least 50% of their films (m
 
 ## Examples
 
+All examples work with either `uv run setterboxd.py` or `python setterboxd.py`.
+
 **Find directors you've almost completed:**
 
 ```bash
-python setterboxd.py watched.csv --only directors --threshold 80
+uv run setterboxd.py watched.csv --only directors --threshold 80
 ```
 
 **Include your watchlist to prioritize films you've already added:**
 
 ```bash
-python setterboxd.py watched.csv --watchlist watchlist.csv
+uv run setterboxd.py watched.csv --watchlist watchlist.csv
 ```
 
 **Focus on recent cinema (1990+) with deeper filmographies:**
 
 ```bash
-python setterboxd.py watched.csv --min-year 1990 --min-titles 10
+uv run setterboxd.py watched.csv --min-year 1990 --min-titles 10
 ```
 
 **Include TV movies and miniseries:**
 
 ```bash
-python setterboxd.py watched.csv --types movie tvMovie tvMiniSeries
+uv run setterboxd.py watched.csv --types movie tvMovie tvMiniSeries
 ```
 
 **See debug info for unmatched titles:**
 
 ```bash
-python setterboxd.py watched.csv --debug
+uv run setterboxd.py watched.csv --debug
 ```
 
 ## All Options
