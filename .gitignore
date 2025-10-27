@@ -1,0 +1,6 @@
+__pycache__/
+*.py[codz]
+build/
+dist/
+
+/imdb_data/
