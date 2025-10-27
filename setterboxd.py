@@ -24,6 +24,7 @@ import sqlite3
 import sys
 import urllib.request
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, NamedTuple, TextIO, TypedDict
@@ -106,6 +107,25 @@ class ImdbMatch(NamedTuple):
     tconst: str
     title: str
     year: int
+
+
+@dataclass(frozen=True)
+class Filters:
+    """Filtering parameters applied consistently across the pipeline."""
+
+    min_year: int
+    max_year: int
+    year_tolerance: int
+    title_types: set[int]
+
+    def to_sql(self) -> tuple[str, list]:
+        """Returns (WHERE clause fragment, params) for filtering."""
+        placeholders = ",".join("?" * len(self.title_types))
+        where_clause = f"""m.year >= ?
+              AND (m.year IS NULL OR m.year <= ?)
+              AND m.title_type IN ({placeholders})"""
+        params = [self.min_year, self.max_year, *self.title_types]
+        return (where_clause, params)
 
 
 def normalize_title(title: str) -> str:
@@ -446,11 +466,10 @@ def _try_exact_match(
     cursor: sqlite3.Cursor,
     title_lower: str,
     year: int,
-    year_tolerance: int,
-    title_types: set[int],
+    filters: Filters,
 ) -> ImdbMatch | None:
     """Try exact match on title_lower and original_title_lower with year range"""
-    type_placeholders = ",".join("?" * len(title_types))
+    type_placeholders = ",".join("?" * len(filters.title_types))
     cursor.execute(
         f"""
         SELECT tconst, title, year
@@ -460,7 +479,13 @@ def _try_exact_match(
           AND title_type IN ({type_placeholders})
         LIMIT 1
     """,
-        (title_lower, title_lower, year - year_tolerance, year + year_tolerance, *title_types),
+        (
+            title_lower,
+            title_lower,
+            year - filters.year_tolerance,
+            year + filters.year_tolerance,
+            *filters.title_types,
+        ),
     )
     if result := cursor.fetchone():
         return ImdbMatch(result[0], result[1], result[2])
@@ -472,18 +497,15 @@ def match_movie_sqlite(
     conn: sqlite3.Connection,
     title: str,
     year: int | None,
-    title_types: set[int],
-    year_tolerance: int = 1,
+    filters: Filters,
 ) -> ImdbMatch | None:
     """Match a title using SQLite indexed queries with multiple fallback strategies"""
     title_lower = normalize_title(title)
     cursor = conn.cursor()
-    type_placeholders = ",".join("?" * len(title_types))
+    type_placeholders = ",".join("?" * len(filters.title_types))
 
     # Try exact match with year
-    if year is not None and (
-        result := _try_exact_match(cursor, title_lower, year, year_tolerance, title_types)
-    ):
+    if year is not None and (result := _try_exact_match(cursor, title_lower, year, filters)):
         return result
 
     # Try without year constraint
@@ -496,7 +518,7 @@ def match_movie_sqlite(
         ORDER BY ABS(year - ?) ASC
         LIMIT 1
     """,
-        (title_lower, *title_types, year if year is not None else 0),
+        (title_lower, *filters.title_types, year if year is not None else 0),
     )
     if result := cursor.fetchone():
         return ImdbMatch(result[0], result[1], result[2])
@@ -528,7 +550,7 @@ def match_movie_sqlite(
 
     # Try each alternative with exact match
     for alt_title in alternative_titles:
-        if result := _try_exact_match(cursor, alt_title, year, year_tolerance, title_types):
+        if result := _try_exact_match(cursor, alt_title, year, filters):
             return result
 
     # Prefix match: "Mission: Impossible" matches "Mission: Impossible - Part One"
@@ -549,7 +571,12 @@ def match_movie_sqlite(
             ORDER BY LENGTH(title_lower) ASC
             LIMIT 1
         """,
-            (pattern, year - year_tolerance, year + year_tolerance, *title_types),
+            (
+                pattern,
+                year - filters.year_tolerance,
+                year + filters.year_tolerance,
+                *filters.title_types,
+            ),
         )
         if result := cursor.fetchone():
             return ImdbMatch(result[0], result[1], result[2])
@@ -658,9 +685,7 @@ def collect_people_from_watched_movies(
     table_name: Literal["directors", "actors"],
     person_type: Literal["director", "actor"],
     min_watched: int,
-    min_year: int,
-    max_year: int,
-    title_types: set[int],
+    filters: Filters,
 ) -> dict[str, Person]:
     """
     Collect directors or actors from watched titles with progress tracking.
@@ -671,17 +696,15 @@ def collect_people_from_watched_movies(
         table_name: "directors" or "actors"
         person_type: "director" or "actor" (for display)
         min_watched: Minimum watched titles to include person
-        min_year: Minimum release year to include
-        max_year: Maximum release year to include
-        title_types: Set of title type IDs to include
+        filters: Filtering parameters (year range, title types)
 
     Returns:
         Dictionary mapping person_id to {name, watched} data
     """
     tconsts = list(watched_tconsts)
     placeholders = ",".join("?" * len(tconsts))
-    type_placeholders = ",".join("?" * len(title_types))
     id_column = f"{person_type}_id"
+    where_clause, filter_params = filters.to_sql()
 
     # Get count for progress bar
     with console.status(f"[cyan]Counting {person_type}s in watched titles..."):
@@ -691,11 +714,9 @@ def collect_people_from_watched_movies(
             FROM {table_name} t
             JOIN titles m ON t.title_id = m.tconst
             WHERE t.title_id IN ({placeholders})
-              AND m.year >= ?
-              AND (m.year IS NULL OR m.year <= ?)
-              AND m.title_type IN ({type_placeholders})
+              AND {where_clause}
         """,
-            [*tconsts, min_year, max_year, *title_types],
+            [*tconsts, *filter_params],
         )
         total_entries = cursor.fetchone()[0]
 
@@ -713,11 +734,9 @@ def collect_people_from_watched_movies(
             JOIN names n ON t.{id_column} = n.name_id
             JOIN titles m ON t.title_id = m.tconst
             WHERE t.title_id IN ({placeholders})
-              AND m.year >= ?
-              AND (m.year IS NULL OR m.year <= ?)
-              AND m.title_type IN ({type_placeholders})
+              AND {where_clause}
         """,
-            [*tconsts, min_year, max_year, *title_types],
+            [*tconsts, *filter_params],
         )
 
         # Build dict of people by ID directly
@@ -757,14 +776,13 @@ def fetch_filmographies_bulk(
     candidates: dict[str, Person],
     table_name: Literal["directors", "actors"],
     person_type: Literal["director", "actor"],
-    min_year: int,
-    title_types: set[int],
+    filters: Filters,
 ) -> dict[str, set[Film]]:
     """Fetch filmographies for multiple people in a single bulk query."""
     with console.status(f"[cyan]Fetching {person_type} filmographies..."):
         person_placeholders = ",".join("?" * len(candidates))
-        type_placeholders = ",".join("?" * len(title_types))
         id_column = f"{person_type}_id"
+        where_clause, filter_params = filters.to_sql()
 
         cursor.execute(
             f"""
@@ -772,11 +790,9 @@ def fetch_filmographies_bulk(
             FROM {table_name} t
             JOIN titles m ON t.title_id = m.tconst
             WHERE t.{id_column} IN ({person_placeholders})
-              AND m.year >= ?
-              AND (m.year IS NULL OR m.year <= ?)
-              AND m.title_type IN ({type_placeholders})
+              AND {where_clause}
         """,
-            [*candidates.keys(), min_year, CURRENT_YEAR, *title_types],
+            [*candidates.keys(), *filter_params],
         )
 
         filmographies = defaultdict(set)
@@ -837,15 +853,13 @@ def analyze_sets(
     threshold: int,
     only: Literal["directors", "actors"] | None,
     max_results: int,
-    min_year: int,
     debug: bool,
-    types: list[str],
+    filters: Filters,
     db_path: Path,
     watchlist_file: TextIO | None = None,
 ) -> list[PersonResult]:
     analyze_directors = only is None or only == "directors"
     analyze_actors = only is None or only == "actors"
-    title_types = {TITLE_TYPE_MAP[name] for name in types}
 
     console.print("\n[bold magenta]🎬 Letterboxd Set Analyzer[/bold magenta]\n")
 
@@ -876,7 +890,7 @@ def analyze_sets(
         title = str(row["Name"])
         year = int(row["Year"]) if pd.notna(row["Year"]) else None  # type: ignore[arg-type]
 
-        if match := match_movie_sqlite(conn, title, year, title_types):
+        if match := match_movie_sqlite(conn, title, year, filters):
             watched_tconsts.add(match.tconst)
         else:
             year_str = f" ({year})" if year is not None else ""
@@ -886,10 +900,13 @@ def analyze_sets(
     db_modified_time = datetime.fromtimestamp(Path(db_path).stat().st_mtime)
     dataset_date = db_modified_time.strftime("%Y-%m-%d")
 
+    type_names = [
+        name for name, type_id in TITLE_TYPE_MAP.items() if type_id in filters.title_types
+    ]
     console.print(
         f"✓ Matched [green]{len(watched_tconsts)}/{len(watched_df)}[/green] titles "
         f"([cyan]{len(watched_tconsts) / len(watched_df) * 100:.1f}%[/cyan]) "
-        f"[dim]({','.join(types)} • {min_year}–{CURRENT_YEAR} • IMDb {dataset_date})[/dim]"
+        f"[dim]({','.join(type_names)} • {filters.min_year}–{filters.max_year} • IMDb {dataset_date})[/dim]"
     )
 
     if unmatched and debug:
@@ -903,23 +920,16 @@ def analyze_sets(
         for _idx, row in watchlist_df.iterrows():
             title = str(row["Name"])
             year = int(row["Year"]) if pd.notna(row["Year"]) else None  # type: ignore[arg-type]
-            if match := match_movie_sqlite(conn, title, year, title_types):
+            if match := match_movie_sqlite(conn, title, year, filters):
                 watchlist_films.add(Film(match.title, match.year))
 
     director_results: list[PersonResult] = []
     if analyze_directors:
         director_candidates = collect_people_from_watched_movies(
-            cursor,
-            watched_tconsts,
-            "directors",
-            "director",
-            min_watched=3,
-            min_year=min_year,
-            max_year=CURRENT_YEAR,
-            title_types=title_types,
+            cursor, watched_tconsts, "directors", "director", min_watched=3, filters=filters
         )
         director_filmographies = fetch_filmographies_bulk(
-            cursor, director_candidates, "directors", "director", min_year, title_types
+            cursor, director_candidates, "directors", "director", filters
         )
         director_results = calculate_completion_results(
             director_candidates, director_filmographies, "director", min_set_size
@@ -930,17 +940,10 @@ def analyze_sets(
     if analyze_actors:
         console.print()
         actor_candidates = collect_people_from_watched_movies(
-            cursor,
-            watched_tconsts,
-            "actors",
-            "actor",
-            min_watched=5,
-            min_year=min_year,
-            max_year=CURRENT_YEAR,
-            title_types=title_types,
+            cursor, watched_tconsts, "actors", "actor", min_watched=5, filters=filters
         )
         actor_filmographies = fetch_filmographies_bulk(
-            cursor, actor_candidates, "actors", "actor", min_year, title_types
+            cursor, actor_candidates, "actors", "actor", filters
         )
         actor_results = calculate_completion_results(
             actor_candidates, actor_filmographies, "actor", min_set_size
@@ -1224,6 +1227,13 @@ Examples:
     if args.min_titles < 1:
         parser.error("Minimum titles must be at least 1")
 
+    filters = Filters(
+        min_year=args.min_year,
+        max_year=CURRENT_YEAR,
+        year_tolerance=1,
+        title_types={TITLE_TYPE_MAP[name] for name in args.types},
+    )
+
     try:
         analyze_sets(
             watched_file=args.file,
@@ -1231,9 +1241,8 @@ Examples:
             threshold=args.threshold,
             only=args.only,
             max_results=args.limit,
-            min_year=args.min_year,
             debug=args.debug,
-            types=args.types,
+            filters=filters,
             db_path=db_path,
             watchlist_file=args.watchlist,
         )
