@@ -658,6 +658,9 @@ def collect_people_from_watched_movies(
     table_name: Literal["directors", "actors"],
     person_type: Literal["director", "actor"],
     min_watched: int,
+    min_year: int,
+    max_year: int,
+    title_types: set[int],
 ) -> dict[str, Person]:
     """
     Collect directors or actors from watched titles with progress tracking.
@@ -668,12 +671,16 @@ def collect_people_from_watched_movies(
         table_name: "directors" or "actors"
         person_type: "director" or "actor" (for display)
         min_watched: Minimum watched titles to include person
+        min_year: Minimum release year to include
+        max_year: Maximum release year to include
+        title_types: Set of title type IDs to include
 
     Returns:
         Dictionary mapping person_id to {name, watched} data
     """
     tconsts = list(watched_tconsts)
     placeholders = ",".join("?" * len(tconsts))
+    type_placeholders = ",".join("?" * len(title_types))
     id_column = f"{person_type}_id"
 
     # Get count for progress bar
@@ -682,9 +689,13 @@ def collect_people_from_watched_movies(
             f"""
             SELECT COUNT(*)
             FROM {table_name} t
+            JOIN titles m ON t.title_id = m.tconst
             WHERE t.title_id IN ({placeholders})
+              AND m.year >= ?
+              AND (m.year IS NULL OR m.year <= ?)
+              AND m.title_type IN ({type_placeholders})
         """,
-            tconsts,
+            [*tconsts, min_year, max_year, *title_types],
         )
         total_entries = cursor.fetchone()[0]
 
@@ -702,8 +713,11 @@ def collect_people_from_watched_movies(
             JOIN names n ON t.{id_column} = n.name_id
             JOIN titles m ON t.title_id = m.tconst
             WHERE t.title_id IN ({placeholders})
+              AND m.year >= ?
+              AND (m.year IS NULL OR m.year <= ?)
+              AND m.title_type IN ({type_placeholders})
         """,
-            tconsts,
+            [*tconsts, min_year, max_year, *title_types],
         )
 
         # Build dict of people by ID directly
@@ -895,7 +909,14 @@ def analyze_sets(
     director_results: list[PersonResult] = []
     if analyze_directors:
         director_candidates = collect_people_from_watched_movies(
-            cursor, watched_tconsts, "directors", "director", min_watched=3
+            cursor,
+            watched_tconsts,
+            "directors",
+            "director",
+            min_watched=3,
+            min_year=min_year,
+            max_year=CURRENT_YEAR,
+            title_types=title_types,
         )
         director_filmographies = fetch_filmographies_bulk(
             cursor, director_candidates, "directors", "director", min_year, title_types
@@ -909,7 +930,14 @@ def analyze_sets(
     if analyze_actors:
         console.print()
         actor_candidates = collect_people_from_watched_movies(
-            cursor, watched_tconsts, "actors", "actor", min_watched=5
+            cursor,
+            watched_tconsts,
+            "actors",
+            "actor",
+            min_watched=5,
+            min_year=min_year,
+            max_year=CURRENT_YEAR,
+            title_types=title_types,
         )
         actor_filmographies = fetch_filmographies_bulk(
             cursor, actor_candidates, "actors", "actor", min_year, title_types
