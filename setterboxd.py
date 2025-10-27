@@ -443,18 +443,24 @@ def get_db_connection(db_path: Path) -> sqlite3.Connection:
 
 
 def _try_exact_match(
-    cursor: sqlite3.Cursor, title_lower: str, year: int, year_tolerance: int
+    cursor: sqlite3.Cursor,
+    title_lower: str,
+    year: int,
+    year_tolerance: int,
+    title_types: set[int],
 ) -> ImdbMatch | None:
     """Try exact match on title_lower and original_title_lower with year range"""
+    type_placeholders = ",".join("?" * len(title_types))
     cursor.execute(
-        """
+        f"""
         SELECT tconst, title, year
         FROM titles
         WHERE (title_lower = ? OR original_title_lower = ?)
           AND year BETWEEN ? AND ?
+          AND title_type IN ({type_placeholders})
         LIMIT 1
     """,
-        (title_lower, title_lower, year - year_tolerance, year + year_tolerance),
+        (title_lower, title_lower, year - year_tolerance, year + year_tolerance, *title_types),
     )
     if result := cursor.fetchone():
         return ImdbMatch(result[0], result[1], result[2])
@@ -463,26 +469,34 @@ def _try_exact_match(
 
 
 def match_movie_sqlite(
-    conn: sqlite3.Connection, title: str, year: int | None, year_tolerance: int = 1
+    conn: sqlite3.Connection,
+    title: str,
+    year: int | None,
+    title_types: set[int],
+    year_tolerance: int = 1,
 ) -> ImdbMatch | None:
     """Match a title using SQLite indexed queries with multiple fallback strategies"""
     title_lower = normalize_title(title)
     cursor = conn.cursor()
+    type_placeholders = ",".join("?" * len(title_types))
 
     # Try exact match with year
-    if year is not None and (result := _try_exact_match(cursor, title_lower, year, year_tolerance)):
+    if year is not None and (
+        result := _try_exact_match(cursor, title_lower, year, year_tolerance, title_types)
+    ):
         return result
 
     # Try without year constraint
     cursor.execute(
-        """
+        f"""
         SELECT tconst, title, year
         FROM titles
         WHERE title_lower = ?
+          AND title_type IN ({type_placeholders})
         ORDER BY ABS(year - ?) ASC
         LIMIT 1
     """,
-        (title_lower, year if year is not None else 0),
+        (title_lower, *title_types, year if year is not None else 0),
     )
     if result := cursor.fetchone():
         return ImdbMatch(result[0], result[1], result[2])
@@ -514,7 +528,7 @@ def match_movie_sqlite(
 
     # Try each alternative with exact match
     for alt_title in alternative_titles:
-        if result := _try_exact_match(cursor, alt_title, year, year_tolerance):
+        if result := _try_exact_match(cursor, alt_title, year, year_tolerance, title_types):
             return result
 
     # Prefix match: "Mission: Impossible" matches "Mission: Impossible - Part One"
@@ -526,14 +540,16 @@ def match_movie_sqlite(
 
     for pattern in fuzzy_patterns:
         cursor.execute(
-            """
+            f"""
             SELECT tconst, title, year
             FROM titles
-            WHERE title_lower LIKE ? AND year BETWEEN ? AND ?
+            WHERE title_lower LIKE ?
+              AND year BETWEEN ? AND ?
+              AND title_type IN ({type_placeholders})
             ORDER BY LENGTH(title_lower) ASC
             LIMIT 1
         """,
-            (pattern, year - year_tolerance, year + year_tolerance),
+            (pattern, year - year_tolerance, year + year_tolerance, *title_types),
         )
         if result := cursor.fetchone():
             return ImdbMatch(result[0], result[1], result[2])
@@ -846,7 +862,7 @@ def analyze_sets(
         title = str(row["Name"])
         year = int(row["Year"]) if pd.notna(row["Year"]) else None  # type: ignore[arg-type]
 
-        if match := match_movie_sqlite(conn, title, year):
+        if match := match_movie_sqlite(conn, title, year, title_types):
             watched_tconsts.add(match.tconst)
         else:
             year_str = f" ({year})" if year is not None else ""
@@ -873,7 +889,7 @@ def analyze_sets(
         for _idx, row in watchlist_df.iterrows():
             title = str(row["Name"])
             year = int(row["Year"]) if pd.notna(row["Year"]) else None  # type: ignore[arg-type]
-            if match := match_movie_sqlite(conn, title, year):
+            if match := match_movie_sqlite(conn, title, year, title_types):
                 watchlist_films.add(Film(match.title, match.year))
 
     director_results: list[PersonResult] = []
