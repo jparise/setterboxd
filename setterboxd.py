@@ -468,45 +468,28 @@ def convert_to_sqlite(db_path: Path) -> None:
     console.print(f"✓ Inserted [cyan]{len(names_df):,}[/cyan] names")
 
     # Create indexes with transient progress bar
-    with make_progress(transient=True) as progress:
-        task = progress.add_task("[cyan]Creating indexes (2-3 minutes)...", total=10)
-
-        # Composite index for the most common query pattern (title + year range)
-        cursor.execute("CREATE INDEX idx_titles_title_year ON titles(title_lower, year)")
-        progress.update(task, advance=1)
-
-        cursor.execute(
-            "CREATE INDEX idx_titles_original_title_year ON titles(original_title_lower, year)"
-        )
-        progress.update(task, advance=1)
-
+    indexes = [
+        # Composite indexes for the most common query patterns
+        ("idx_titles_title_year", "titles(title_lower, year)"),
+        ("idx_titles_original_title_year", "titles(original_title_lower, year)"),
         # Single-column indexes for other query patterns
-        cursor.execute("CREATE INDEX idx_titles_title_lower ON titles(title_lower)")
-        progress.update(task, advance=1)
-
-        cursor.execute(
-            "CREATE INDEX idx_titles_original_title_lower ON titles(original_title_lower)"
-        )
-        progress.update(task, advance=1)
-
-        cursor.execute("CREATE INDEX idx_titles_year ON titles(year)")
-        progress.update(task, advance=1)
-
+        ("idx_titles_title_lower", "titles(title_lower)"),
+        ("idx_titles_original_title_lower", "titles(original_title_lower)"),
+        ("idx_titles_year", "titles(year)"),
         # Composite index for filmography queries (type + year filtering)
-        cursor.execute("CREATE INDEX idx_titles_type_year ON titles(title_type, year)")
-        progress.update(task, advance=1)
+        ("idx_titles_type_year", "titles(title_type, year)"),
+        # Junction table indexes
+        ("idx_directors_title", "directors(title_id)"),
+        ("idx_directors_director", "directors(director_id)"),
+        ("idx_actors_actor", "actors(actor_id)"),
+        ("idx_actors_title", "actors(title_id)"),
+    ]
 
-        cursor.execute("CREATE INDEX idx_directors_title ON directors(title_id)")
-        progress.update(task, advance=1)
-
-        cursor.execute("CREATE INDEX idx_directors_director ON directors(director_id)")
-        progress.update(task, advance=1)
-
-        cursor.execute("CREATE INDEX idx_actors_actor ON actors(actor_id)")
-        progress.update(task, advance=1)
-
-        cursor.execute("CREATE INDEX idx_actors_title ON actors(title_id)")
-        progress.update(task, advance=1)
+    with make_progress(transient=True) as progress:
+        task = progress.add_task("[cyan]Creating indexes (2-3 minutes)...", total=len(indexes))
+        for idx_name, idx_def in indexes:
+            cursor.execute(f"CREATE INDEX {idx_name} ON {idx_def}")
+            progress.update(task, advance=1)
 
     console.print("✓ Created indexes")
 
