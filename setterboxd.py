@@ -308,8 +308,9 @@ def convert_to_sqlite(db_path: Path) -> None:
         progress.update(task, advance=1)
 
         # Step 2: Filter and clean data
-        basics_df = basics_df[basics_df["titleType"].isin(TitleType.__members__)].copy()
-        basics_df = basics_df[basics_df["primaryTitle"].notna()].copy()
+        basics_df = basics_df[
+            basics_df["titleType"].isin(TitleType.__members__) & basics_df["primaryTitle"].notna()
+        ].copy()
         basics_df["titleType"] = basics_df["titleType"].cat.remove_unused_categories()
         basics_df["startYear"] = pd.to_numeric(basics_df["startYear"], errors="coerce").astype(  # type: ignore[union-attr]
             "Int32"
