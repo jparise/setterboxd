@@ -177,11 +177,14 @@ Letterboxd CSV export with columns: `Name`, `Year` (at minimum)
 
 The project uses **ruff** for linting and formatting, and **pyright** for type checking.
 
-**Automatic formatting**: `ruff format` runs automatically via `.claude/settings.json` hooks after any Python file edit. No manual formatting needed.
+**Formatting workflow**: After editing Python files, always run `ruff format setterboxd.py` to ensure consistent code style.
 
-**Manual checks**:
+**Code quality checks**:
 
 ```bash
+# Format code
+ruff format setterboxd.py
+
 # Lint and check code quality
 ruff check setterboxd.py
 
