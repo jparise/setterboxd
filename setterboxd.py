@@ -697,10 +697,8 @@ def format_title_list(
     if not films:
         return ""
 
-    # Partition films: watchlist first, then others (both sorted by year descending)
-    on_watchlist = [f for f in films if f in watchlist_films]
-    not_on_watchlist = [f for f in films if f not in watchlist_films]
-    sorted_films = on_watchlist + not_on_watchlist
+    # Sort films: watchlist first, then by year descending
+    sorted_films = sorted(films, key=lambda f: (f not in watchlist_films, -f.year))
 
     # Calculate how many films fit (using plain text lengths)
     separator = ", "
