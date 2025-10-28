@@ -18,6 +18,7 @@ you already enjoy.
 """
 
 import argparse
+import enum
 import gzip
 import re
 import sqlite3
@@ -59,12 +60,15 @@ def make_progress(**kwargs) -> Progress:
     )
 
 
-TITLE_TYPE_MAP = {
-    "movie": 1,
-    "video": 2,
-    "tvMiniSeries": 3,
-    "tvMovie": 4,
-}
+@enum.unique
+class TitleType(enum.IntEnum):
+    movie = 1
+    video = 2
+    tvMiniSeries = 3  # noqa: N815
+    tvMovie = 4  # noqa: N815
+
+
+TitleType.default = frozenset({TitleType.movie})  # type: ignore[attr-defined]
 
 IMDB_DATASETS: dict[str, str] = {
     "basics": "https://datasets.imdbws.com/title.basics.tsv.gz",
@@ -162,13 +166,14 @@ class Filters:
     # (e.g., 1970-1990 for classic cinema) or filtering out very old/new titles.
     # Supports single year (e.g., Range(1980, 2025)) or specific range (Range(1980, 2000)).
     years: Range
-    # Set of title type IDs to consider (from TITLE_TYPE_MAP). Allows filtering by
-    # content type such as theatrical movies only, or including TV movies and miniseries.
-    title_types: set[int]
     # Year tolerance for fuzzy matching: allows ±N years to handle year discrepancies
     # between Letterboxd and IMDb data. Testing shows year_tolerance=1 rescues ~0.5% of
     # matches with minimal false positive risk; larger values provide diminishing returns.
     year_tolerance: int = 1
+    # Set of title types to consider. Allows filtering by content type such as
+    # theatrical movies only, or including TV movies and miniseries.
+    # Defaults to movie only.
+    title_types: frozenset[TitleType] = TitleType.default  # type: ignore[attr-defined]
 
     def to_sql(self) -> tuple[str, list]:
         """Returns (WHERE clause fragment, params) for filtering."""
@@ -298,8 +303,9 @@ def convert_to_sqlite(db_path: Path) -> None:
         progress.update(task, advance=1)
 
         # Step 2: Filter and clean data
-        basics_df = basics_df[basics_df["titleType"].isin(TITLE_TYPE_MAP)].copy()
+        basics_df = basics_df[basics_df["titleType"].isin(TitleType.__members__)].copy()
         basics_df = basics_df[basics_df["primaryTitle"].notna()].copy()
+        basics_df["titleType"] = basics_df["titleType"].cat.remove_unused_categories()
         basics_df["startYear"] = pd.to_numeric(basics_df["startYear"], errors="coerce").astype(  # type: ignore[union-attr]
             "Int32"
         )
@@ -310,7 +316,9 @@ def convert_to_sqlite(db_path: Path) -> None:
         # Step 3: Create normalized columns
         basics_df["title_lower"] = basics_df["primaryTitle"].apply(normalize_title)
         basics_df["original_title_lower"] = basics_df["originalTitle"].apply(normalize_title)
-        basics_df["title_type_int"] = basics_df["titleType"].map(TITLE_TYPE_MAP).astype("Int32")
+        basics_df["title_type_int"] = (
+            basics_df["titleType"].map(lambda x: TitleType[x]).astype("Int32")
+        )
         progress.update(task, advance=1)
 
         # Step 4: Prepare for SQL insertion
@@ -953,9 +961,7 @@ def analyze_sets(
     db_modified_time = datetime.fromtimestamp(Path(db_path).stat().st_mtime)
     dataset_date = db_modified_time.strftime("%Y-%m-%d")
 
-    type_names = [
-        name for name, type_id in TITLE_TYPE_MAP.items() if type_id in filters.title_types
-    ]
+    type_names = [t.name for t in filters.title_types]
     console.print(
         f"✓ Matched [green]{len(watched_tconsts)}/{len(watched_df)}[/green] titles "
         f"([cyan]{len(watched_tconsts) / len(watched_df) * 100:.1f}%[/cyan]) "
@@ -1233,8 +1239,8 @@ Examples:
         "--types",
         type=str,
         nargs="+",
-        choices=TITLE_TYPE_MAP,
-        default=["movie"],
+        choices=list(TitleType.__members__),
+        default=[t.name for t in TitleType.default],  # type: ignore[attr-defined]
         help="title types to consider",
     )
     filter_group.add_argument(
@@ -1296,7 +1302,7 @@ Examples:
 
     filters = Filters(
         years=args.years,
-        title_types={TITLE_TYPE_MAP[name] for name in args.types},
+        title_types=frozenset(TitleType[name] for name in args.types),
     )
 
     try:
