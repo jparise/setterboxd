@@ -81,6 +81,12 @@ uv run setterboxd.py watched.csv --watchlist watchlist.csv
 uv run setterboxd.py watched.csv --min-year 1990 --min-titles 10
 ```
 
+**Analyze a specific era (e.g., 1980s-2000s cinema):**
+
+```bash
+uv run setterboxd.py watched.csv --min-year 1980 --max-year 2000
+```
+
 **Include TV movies and miniseries:**
 
 ```bash
@@ -99,7 +105,8 @@ uv run setterboxd.py watched.csv --debug
 --threshold, -t    Completion percentage (0-100, default: 50)
 --limit, -n        Max sets to display (default: 20)
 --min-titles, -m   Min films in filmography (default: 5)
---min-year, -y     Filter by minimum year (default: 1930)
+--min-year         Filter by minimum year (default: 1930)
+--max-year         Filter by maximum year (default: current year)
 --only             Analyze only "directors" or "actors"
 --types            Title types: movie, video, tvMovie, tvMiniSeries
 --watchlist        Path to watchlist.csv to prioritize unwatched films

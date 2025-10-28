@@ -59,8 +59,6 @@ def make_progress(**kwargs) -> Progress:
     )
 
 
-CURRENT_YEAR = datetime.now().year
-
 TITLE_TYPE_MAP = {
     "movie": 1,
     "video": 2,
@@ -1147,12 +1145,18 @@ Examples:
         help="minimum number of titles in a filmography to consider",
     )
     filter_group.add_argument(
-        "-y",
         "--min-year",
         type=int,
         metavar="int",
         default=1930,
         help="minimum year for titles to include",
+    )
+    filter_group.add_argument(
+        "--max-year",
+        type=int,
+        metavar="int",
+        default=datetime.now().year,
+        help="maximum year for titles to include",
     )
     filter_group.add_argument(
         "--only",
@@ -1227,9 +1231,14 @@ Examples:
     if args.min_titles < 1:
         parser.error("Minimum titles must be at least 1")
 
+    if args.min_year > args.max_year:
+        parser.error(
+            f"Minimum year ({args.min_year}) cannot be greater than maximum year ({args.max_year})"
+        )
+
     filters = Filters(
         min_year=args.min_year,
-        max_year=CURRENT_YEAR,
+        max_year=args.max_year,
         year_tolerance=1,
         title_types={TITLE_TYPE_MAP[name] for name in args.types},
     )
