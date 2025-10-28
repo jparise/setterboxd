@@ -1202,14 +1202,6 @@ Examples:
         help="maximum number of near-complete sets to display",
     )
     filter_group.add_argument(
-        "-t",
-        "--threshold",
-        type=lambda s: Range.parse(s, 0, 100),
-        default=Range(50, 100),
-        metavar="N or MIN-MAX",
-        help="completion threshold (e.g., 80 for >=80%%, 80-99 to exclude 100%%)",
-    )
-    filter_group.add_argument(
         "-m",
         "--min-titles",
         type=int,
@@ -1218,11 +1210,20 @@ Examples:
         help="minimum number of titles in a filmography to consider",
     )
     filter_group.add_argument(
+        "-t",
+        "--threshold",
+        type=lambda s: Range.parse(s, 0, 100),
+        default=Range(50, 100),
+        metavar="N or MIN-MAX",
+        help="completion threshold (e.g., 80 for >=80%%, 80-99 to exclude 100%%)",
+    )
+    filter_group.add_argument(
+        "-y",
         "--years",
         type=lambda s: Range.parse(s, 1900, datetime.now().year),
         default=Range(1930, datetime.now().year),
         metavar="YEAR or MIN-MAX",
-        help="year range to analyze (e.g., 1980 for >=1980, 1980-2000 for specific era)",
+        help="year range (e.g., 1980 for >=1980, 1980-2000 for specific era)",
     )
     filter_group.add_argument(
         "--name",

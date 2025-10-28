@@ -138,10 +138,10 @@ python setterboxd.py watched.csv --types movie tvMovie tvMiniSeries
 ## Key Parameters
 
 **Filters:**
-- `--threshold` / `-t`: Completion % or range (e.g., 80, 80-99 to exclude 100%, default: 50)
 - `--limit` / `-n`: Maximum number of sets to display (default 20)
 - `--min-titles` / `-m`: Minimum films in a filmography to consider (default 5)
-- `--years`: Year or range (e.g., 1980, 1980-2000 for specific era, default: 1930-present)
+- `--threshold` / `-t`: Completion % or range (e.g., 80, 80-99 to exclude 100%, default: 50)
+- `--years` / `-y`: Year or range (e.g., 1980, 1980-2000 for specific era, default: 1930-present)
 - `--name`: Filter results to specific person names (repeatable, case-insensitive word matching)
 - `--only`: Only analyze `directors` or `actors` (default: analyze both)
 - `--types`: Title types to consider: `movie`, `video`, `tvMovie`, `tvMiniSeries` (default: `movie`)

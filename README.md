@@ -114,10 +114,10 @@ uv run setterboxd.py watched.csv --debug
 ## All Options
 
 ```
---threshold, -t    Completion % or range (e.g., 80, 80-99, default: 50)
 --limit, -n        Max sets to display (default: 20)
 --min-titles, -m   Min films in filmography (default: 5)
---years            Year or range (e.g., 1980, 1980-2000, default: 1930-present)
+--threshold, -t    Completion % or range (e.g., 80, 80-99, default: 50)
+--years, -y        Year or range (e.g., 1980, 1980-2000, default: 1930-present)
 --name             Filter to specific person names (repeatable)
 --only             Analyze only "directors" or "actors"
 --types            Title types: movie, video, tvMovie, tvMiniSeries
