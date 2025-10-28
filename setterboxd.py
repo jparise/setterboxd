@@ -71,6 +71,18 @@ class TitleType(enum.IntEnum):
 
 TitleType.default = frozenset({TitleType.movie})  # type: ignore[attr-defined]
 
+
+@enum.unique
+class PersonType(enum.Enum):
+    director = "director"
+    actor = "actor"
+
+    @property
+    def table_name(self) -> Literal["directors", "actors"]:
+        """Return the database table name for this person type."""
+        return "directors" if self == PersonType.director else "actors"
+
+
 IMDB_DATASETS: dict[str, str] = {
     "basics": "https://datasets.imdbws.com/title.basics.tsv.gz",
     "crew": "https://datasets.imdbws.com/title.crew.tsv.gz",
@@ -889,6 +901,33 @@ def calculate_completion_results(
     return results
 
 
+def analyze_person_type(
+    cursor: sqlite3.Cursor,
+    person_type: PersonType,
+    watched_tconsts: set[str],
+    min_watched: int,
+    min_set_size: int,
+    filters: Filters,
+) -> list[PersonResult]:
+    """Analyze a person type (directors or actors) for completion."""
+    candidates = collect_people_from_watched_movies(
+        cursor,
+        watched_tconsts,
+        person_type.table_name,
+        person_type.value,
+        min_watched=min_watched,
+        filters=filters,
+    )
+    filmographies = fetch_filmographies_bulk(
+        cursor, candidates, person_type.table_name, person_type.value, filters
+    )
+    results = calculate_completion_results(
+        candidates, filmographies, person_type.value, min_set_size
+    )
+    console.print(f"✓ Completed {person_type.value} analysis")
+    return results
+
+
 def analyze_sets(
     watched_file: TextIO,
     min_set_size: int,
@@ -964,32 +1003,20 @@ def analyze_sets(
             if match := match_movie_sqlite(conn, title, year, filters):
                 watchlist_films.add(Film(match.title, match.year))
 
-    director_results: list[PersonResult] = []
-    if analyze_directors:
-        director_candidates = collect_people_from_watched_movies(
-            cursor, watched_tconsts, "directors", "director", min_watched=3, filters=filters
-        )
-        director_filmographies = fetch_filmographies_bulk(
-            cursor, director_candidates, "directors", "director", filters
-        )
-        director_results = calculate_completion_results(
-            director_candidates, director_filmographies, "director", min_set_size
-        )
-        console.print("✓ Completed director analysis")
+    director_results = (
+        analyze_person_type(cursor, PersonType.director, watched_tconsts, 3, min_set_size, filters)
+        if analyze_directors
+        else []
+    )
 
-    actor_results: list[PersonResult] = []
     if analyze_actors:
         console.print()
-        actor_candidates = collect_people_from_watched_movies(
-            cursor, watched_tconsts, "actors", "actor", min_watched=5, filters=filters
-        )
-        actor_filmographies = fetch_filmographies_bulk(
-            cursor, actor_candidates, "actors", "actor", filters
-        )
-        actor_results = calculate_completion_results(
-            actor_candidates, actor_filmographies, "actor", min_set_size
-        )
-        console.print("✓ Completed actor analysis")
+
+    actor_results = (
+        analyze_person_type(cursor, PersonType.actor, watched_tconsts, 5, min_set_size, filters)
+        if analyze_actors
+        else []
+    )
 
     # Combine and sort results by descending completion
     all_results = director_results + actor_results
