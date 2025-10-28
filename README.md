@@ -69,6 +69,12 @@ All examples work with either `uv run setterboxd.py` or `python setterboxd.py`.
 uv run setterboxd.py watched.csv --only directors --threshold 80
 ```
 
+**Exclude 100% complete sets:**
+
+```bash
+uv run setterboxd.py watched.csv --threshold 80-99
+```
+
 **Look up specific directors or actors:**
 
 ```bash
@@ -84,13 +90,13 @@ uv run setterboxd.py watched.csv --watchlist watchlist.csv
 **Focus on recent cinema (1990+) with deeper filmographies:**
 
 ```bash
-uv run setterboxd.py watched.csv --min-year 1990 --min-titles 10
+uv run setterboxd.py watched.csv --years 1990 --min-titles 10
 ```
 
 **Analyze a specific era (e.g., 1980s-2000s cinema):**
 
 ```bash
-uv run setterboxd.py watched.csv --min-year 1980 --max-year 2000
+uv run setterboxd.py watched.csv --years 1980-2000
 ```
 
 **Include TV movies and miniseries:**
@@ -108,11 +114,10 @@ uv run setterboxd.py watched.csv --debug
 ## All Options
 
 ```
---threshold, -t    Completion percentage (0-100, default: 50)
+--threshold, -t    Completion % or range (e.g., 80, 80-99, default: 50)
 --limit, -n        Max sets to display (default: 20)
 --min-titles, -m   Min films in filmography (default: 5)
---min-year         Filter by minimum year (default: 1930)
---max-year         Filter by maximum year (default: current year)
+--years            Year or range (e.g., 1980, 1980-2000, default: 1930-present)
 --name             Filter to specific person names (repeatable)
 --only             Analyze only "directors" or "actors"
 --types            Title types: movie, video, tvMovie, tvMiniSeries

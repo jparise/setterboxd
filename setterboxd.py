@@ -27,7 +27,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, NamedTuple, TextIO, TypedDict
+from typing import Literal, NamedTuple, Self, TextIO, TypedDict
 
 import pandas as pd
 from rich import box
@@ -107,14 +107,61 @@ class ImdbMatch(NamedTuple):
     year: int
 
 
+class Range(NamedTuple):
+    """Numeric range with min and max bounds (inclusive)"""
+
+    min: int
+    max: int
+
+    def __str__(self) -> str:
+        if self.min == self.max:
+            return str(self.min)
+        return f"{self.min}-{self.max}"
+
+    @classmethod
+    def parse(cls, value: str, min_bound: int, max_bound: int) -> Self:
+        """Parse range string like '80' or '80-99'.
+
+        Single values (e.g., '80') default to max_bound as the upper limit.
+        """
+        try:
+            if "-" in value:
+                parts = value.split("-")
+                if len(parts) != 2:
+                    raise argparse.ArgumentTypeError(
+                        f"Invalid range format '{value}'. Use 'N' or 'MIN-MAX'"
+                    )
+                min_val = int(parts[0])
+                max_val = int(parts[1])
+            else:
+                min_val = int(value)
+                max_val = max_bound
+
+            # Validation
+            if not (min_bound <= min_val <= max_bound):
+                raise argparse.ArgumentTypeError(
+                    f"Min value {min_val} out of bounds [{min_bound}, {max_bound}]"
+                )
+            if not (min_bound <= max_val <= max_bound):
+                raise argparse.ArgumentTypeError(
+                    f"Max value {max_val} out of bounds [{min_bound}, {max_bound}]"
+                )
+            if min_val > max_val:
+                raise argparse.ArgumentTypeError(f"Min {min_val} cannot exceed max {max_val}")
+
+            return cls(min_val, max_val)
+        except ValueError as e:
+            raise argparse.ArgumentTypeError(f"Invalid number in range '{value}'") from e
+
+
 @dataclass(frozen=True)
 class Filters:
     """Filtering parameters applied consistently across the pipeline."""
 
     # Year range for titles to include in analysis. Allows focusing on specific eras
     # (e.g., 1970-1990 for classic cinema) or filtering out very old/new titles.
-    min_year: int
-    max_year: int
+    # Supports single year (e.g., Range(1980, 2025)) or specific range (Range(1980, 2000)).
+    years: Range
     # Set of title type IDs to consider (from TITLE_TYPE_MAP). Allows filtering by
     # content type such as theatrical movies only, or including TV movies and miniseries.
     title_types: set[int]
@@ -129,7 +176,7 @@ class Filters:
         where_clause = f"""m.year >= ?
               AND (m.year IS NULL OR m.year <= ?)
               AND m.title_type IN ({placeholders})"""
-        params = [self.min_year, self.max_year, *self.title_types]
+        params = [self.years.min, self.years.max, *self.title_types]
         return (where_clause, params)
 
 
@@ -855,7 +902,7 @@ def calculate_completion_results(
 def analyze_sets(
     watched_file: TextIO,
     min_set_size: int,
-    threshold: int,
+    threshold: Range,
     only: Literal["directors", "actors"] | None,
     max_results: int,
     debug: bool,
@@ -912,7 +959,7 @@ def analyze_sets(
     console.print(
         f"✓ Matched [green]{len(watched_tconsts)}/{len(watched_df)}[/green] titles "
         f"([cyan]{len(watched_tconsts) / len(watched_df) * 100:.1f}%[/cyan]) "
-        f"[dim]({','.join(type_names)} • {filters.min_year}–{filters.max_year} • IMDb {dataset_date})[/dim]"
+        f"[dim]({','.join(type_names)} • {filters.years} • IMDb {dataset_date})[/dim]"
     )
 
     if unmatched and debug:
@@ -988,8 +1035,11 @@ def analyze_sets(
             r for r in all_results if any(pattern.search(r["name"]) for pattern in name_patterns)
         ]
     else:
-        threshold_decimal = threshold / 100
-        filtered_results = [r for r in all_results if r["completion"] >= threshold_decimal]
+        threshold_min = threshold.min / 100
+        threshold_max = threshold.max / 100
+        filtered_results = [
+            r for r in all_results if threshold_min <= r["completion"] <= threshold_max
+        ]
 
     if debug:
         completed = [r for r in filtered_results if r["completion"] == 1.0]
@@ -1071,7 +1121,7 @@ def analyze_sets(
 
         console.print(table)
     elif all_results:
-        filter_desc = "filtered by name" if filter_names else f"{threshold}%+"
+        filter_desc = "filtered by name" if filter_names else f"{threshold}%"
         max_completion = max(r["completion"] for r in all_results) * 100
         suggested_threshold = int(max_completion * 0.9)  # Suggest 90% of max
         console.print(
@@ -1148,10 +1198,10 @@ Examples:
     filter_group.add_argument(
         "-t",
         "--threshold",
-        type=int,
-        metavar="int",
-        default=50,
-        help="completion threshold percentage for near-complete sets (0-100)",
+        type=lambda s: Range.parse(s, 0, 100),
+        default=Range(50, 100),
+        metavar="N or MIN-MAX",
+        help="completion threshold (e.g., 80 for >=80%%, 80-99 to exclude 100%%)",
     )
     filter_group.add_argument(
         "-m",
@@ -1162,18 +1212,11 @@ Examples:
         help="minimum number of titles in a filmography to consider",
     )
     filter_group.add_argument(
-        "--min-year",
-        type=int,
-        metavar="int",
-        default=1930,
-        help="minimum year for titles to include",
-    )
-    filter_group.add_argument(
-        "--max-year",
-        type=int,
-        metavar="int",
-        default=datetime.now().year,
-        help="maximum year for titles to include",
+        "--years",
+        type=lambda s: Range.parse(s, 1900, datetime.now().year),
+        default=Range(1930, datetime.now().year),
+        metavar="YEAR or MIN-MAX",
+        help="year range to analyze (e.g., 1980 for >=1980, 1980-2000 for specific era)",
     )
     filter_group.add_argument(
         "--name",
@@ -1248,20 +1291,11 @@ Examples:
     if not args.file:
         parser.error("the following arguments are required: file")
 
-    if args.threshold < 0 or args.threshold > 100:
-        parser.error("Threshold must be between 0 and 100")
-
     if args.min_titles < 1:
         parser.error("Minimum titles must be at least 1")
 
-    if args.min_year > args.max_year:
-        parser.error(
-            f"Minimum year ({args.min_year}) cannot be greater than maximum year ({args.max_year})"
-        )
-
     filters = Filters(
-        min_year=args.min_year,
-        max_year=args.max_year,
+        years=args.years,
         title_types={TITLE_TYPE_MAP[name] for name in args.types},
     )
 

@@ -59,6 +59,9 @@ python setterboxd.py watched.csv
 # With custom thresholds and limits
 python setterboxd.py watched.csv --threshold 80 --limit 20
 
+# Exclude 100% complete sets
+python setterboxd.py watched.csv --threshold 80-99
+
 # Analyze only directors or actors
 python setterboxd.py watched.csv --only directors
 python setterboxd.py watched.csv --only actors
@@ -67,10 +70,10 @@ python setterboxd.py watched.csv --only actors
 python setterboxd.py watched.csv --name Hitchcock --name "John Ford"
 
 # Adjust set parameters
-python setterboxd.py watched.csv --min-titles 10 --min-year 1970
+python setterboxd.py watched.csv --min-titles 10 --years 1970
 
 # Analyze a specific era
-python setterboxd.py watched.csv --min-year 1980 --max-year 2000
+python setterboxd.py watched.csv --years 1980-2000
 
 # Include watchlist to prioritize unwatched films
 python setterboxd.py watched.csv --watchlist watchlist.csv
@@ -135,11 +138,10 @@ python setterboxd.py watched.csv --types movie tvMovie tvMiniSeries
 ## Key Parameters
 
 **Filters:**
-- `--threshold` / `-t`: Completion percentage threshold, 0-100 (default 50)
+- `--threshold` / `-t`: Completion % or range (e.g., 80, 80-99 to exclude 100%, default: 50)
 - `--limit` / `-n`: Maximum number of sets to display (default 20)
 - `--min-titles` / `-m`: Minimum films in a filmography to consider (default 5)
-- `--min-year`: Filter films by minimum release year (default 1930)
-- `--max-year`: Filter films by maximum release year (default: current year)
+- `--years`: Year or range (e.g., 1980, 1980-2000 for specific era, default: 1930-present)
 - `--name`: Filter results to specific person names (repeatable, case-insensitive word matching)
 - `--only`: Only analyze `directors` or `actors` (default: analyze both)
 - `--types`: Title types to consider: `movie`, `video`, `tvMovie`, `tvMiniSeries` (default: `movie`)
