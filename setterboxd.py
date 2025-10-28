@@ -25,6 +25,7 @@ import sqlite3
 import sys
 import urllib.request
 from collections import defaultdict
+from collections.abc import Sized
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -177,12 +178,16 @@ class Filters:
 
     def to_sql(self) -> tuple[str, list]:
         """Returns (WHERE clause fragment, params) for filtering."""
-        placeholders = ",".join("?" * len(self.title_types))
         where_clause = f"""m.year >= ?
               AND (m.year IS NULL OR m.year <= ?)
-              AND m.title_type IN ({placeholders})"""
+              AND m.title_type IN ({sql_placeholders(self.title_types)})"""
         params = [self.years.min, self.years.max, *self.title_types]
         return (where_clause, params)
+
+
+def sql_placeholders(collection: Sized) -> str:
+    """Generate SQL placeholders for a collection: '?,?,?'"""
+    return ",".join("?" * len(collection))
 
 
 def normalize_title(title: str) -> str:
@@ -529,14 +534,13 @@ def _try_exact_match(
     filters: Filters,
 ) -> ImdbMatch | None:
     """Try exact match on title_lower and original_title_lower with year range"""
-    type_placeholders = ",".join("?" * len(filters.title_types))
     cursor.execute(
         f"""
         SELECT tconst, title, year
         FROM titles
         WHERE (title_lower = ? OR original_title_lower = ?)
           AND year BETWEEN ? AND ?
-          AND title_type IN ({type_placeholders})
+          AND title_type IN ({sql_placeholders(filters.title_types)})
         LIMIT 1
     """,
         (
@@ -562,7 +566,6 @@ def match_movie_sqlite(
     """Match a title using SQLite indexed queries with multiple fallback strategies"""
     title_lower = normalize_title(title)
     cursor = conn.cursor()
-    type_placeholders = ",".join("?" * len(filters.title_types))
 
     # Try exact match with year
     if year is not None and (result := _try_exact_match(cursor, title_lower, year, filters)):
@@ -574,7 +577,7 @@ def match_movie_sqlite(
         SELECT tconst, title, year
         FROM titles
         WHERE title_lower = ?
-          AND title_type IN ({type_placeholders})
+          AND title_type IN ({sql_placeholders(filters.title_types)})
         ORDER BY ABS(year - ?) ASC
         LIMIT 1
     """,
@@ -627,7 +630,7 @@ def match_movie_sqlite(
             FROM titles
             WHERE title_lower LIKE ?
               AND year BETWEEN ? AND ?
-              AND title_type IN ({type_placeholders})
+              AND title_type IN ({sql_placeholders(filters.title_types)})
             ORDER BY LENGTH(title_lower) ASC
             LIMIT 1
         """,
@@ -649,12 +652,11 @@ def fetch_min_years_from_db(cursor: sqlite3.Cursor, titles: set[str]) -> dict[st
     if not titles:
         return {}
 
-    placeholders = ",".join("?" * len(titles))
     cursor.execute(
         f"""
         SELECT title, MIN(year) as min_year
         FROM titles
-        WHERE title IN ({placeholders})
+        WHERE title IN ({sql_placeholders(titles)})
         GROUP BY title
     """,
         list(titles),
@@ -760,7 +762,6 @@ def collect_people_from_watched_movies(
         Dictionary mapping person_id to {name, watched} data
     """
     tconsts = list(watched_tconsts)
-    placeholders = ",".join("?" * len(tconsts))
     id_column = f"{person_type}_id"
     where_clause, filter_params = filters.to_sql()
 
@@ -771,7 +772,7 @@ def collect_people_from_watched_movies(
             SELECT COUNT(*)
             FROM {table_name} t
             JOIN titles m ON t.title_id = m.tconst
-            WHERE t.title_id IN ({placeholders})
+            WHERE t.title_id IN ({sql_placeholders(tconsts)})
               AND {where_clause}
         """,
             [*tconsts, *filter_params],
@@ -791,7 +792,7 @@ def collect_people_from_watched_movies(
             FROM {table_name} t
             JOIN names n ON t.{id_column} = n.name_id
             JOIN titles m ON t.title_id = m.tconst
-            WHERE t.title_id IN ({placeholders})
+            WHERE t.title_id IN ({sql_placeholders(tconsts)})
               AND {where_clause}
         """,
             [*tconsts, *filter_params],
@@ -838,7 +839,6 @@ def fetch_filmographies_bulk(
 ) -> dict[str, set[Film]]:
     """Fetch filmographies for multiple people in a single bulk query."""
     with console.status(f"[cyan]Fetching {person_type} filmographies..."):
-        person_placeholders = ",".join("?" * len(candidates))
         id_column = f"{person_type}_id"
         where_clause, filter_params = filters.to_sql()
 
@@ -847,7 +847,7 @@ def fetch_filmographies_bulk(
             SELECT t.{id_column}, m.title, m.year
             FROM {table_name} t
             JOIN titles m ON t.title_id = m.tconst
-            WHERE t.{id_column} IN ({person_placeholders})
+            WHERE t.{id_column} IN ({sql_placeholders(candidates)})
               AND {where_clause}
         """,
             [*candidates.keys(), *filter_params],
