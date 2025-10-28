@@ -69,6 +69,12 @@ All examples work with either `uv run setterboxd.py` or `python setterboxd.py`.
 uv run setterboxd.py watched.csv --only directors --threshold 80
 ```
 
+**Look up specific directors or actors:**
+
+```bash
+uv run setterboxd.py watched.csv --name Hitchcock --name "John Ford"
+```
+
 **Include your watchlist to prioritize films you've already added:**
 
 ```bash
@@ -107,6 +113,7 @@ uv run setterboxd.py watched.csv --debug
 --min-titles, -m   Min films in filmography (default: 5)
 --min-year         Filter by minimum year (default: 1930)
 --max-year         Filter by maximum year (default: current year)
+--name             Filter to specific person names (repeatable)
 --only             Analyze only "directors" or "actors"
 --types            Title types: movie, video, tvMovie, tvMiniSeries
 --watchlist        Path to watchlist.csv to prioritize unwatched films

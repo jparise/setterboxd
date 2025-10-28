@@ -855,6 +855,7 @@ def analyze_sets(
     filters: Filters,
     db_path: Path,
     watchlist_file: TextIO | None = None,
+    filter_names: list[str] | None = None,
 ) -> list[PersonResult]:
     analyze_directors = only is None or only == "directors"
     analyze_actors = only is None or only == "actors"
@@ -970,10 +971,18 @@ def analyze_sets(
                 f"{min(actor_completions):.1f}% - {max(actor_completions):.1f}%[/dim]"
             )
 
-    # Filter results by threshold
+    # Filter results by threshold or names
     console.print()
-    threshold_decimal = threshold / 100
-    filtered_results = [r for r in all_results if r["completion"] >= threshold_decimal]
+    if filter_names:
+        name_patterns = [
+            re.compile(rf"\b{re.escape(name.strip())}\b", re.IGNORECASE) for name in filter_names
+        ]
+        filtered_results = [
+            r for r in all_results if any(pattern.search(r["name"]) for pattern in name_patterns)
+        ]
+    else:
+        threshold_decimal = threshold / 100
+        filtered_results = [r for r in all_results if r["completion"] >= threshold_decimal]
 
     if debug:
         completed = [r for r in filtered_results if r["completion"] == 1.0]
@@ -1055,14 +1064,15 @@ def analyze_sets(
 
         console.print(table)
     elif all_results:
+        filter_desc = "filtered by name" if filter_names else f"{threshold}%+"
         max_completion = max(r["completion"] for r in all_results) * 100
         suggested_threshold = int(max_completion * 0.9)  # Suggest 90% of max
         console.print(
             Panel(
-                f"[yellow]No sets found at {threshold}% threshold.[/yellow]\n"
+                f"[yellow]No sets found ({filter_desc}).[/yellow]\n"
                 f"[dim]Highest completion: {max_completion:.0f}%[/dim]\n"
                 f"[dim]Try: --threshold {suggested_threshold}[/dim]",
-                title=f"📊 Sets ({threshold}%+)",
+                title=f"📊 Sets ({filter_desc})",
                 border_style="yellow",
             )
         )
@@ -1071,7 +1081,7 @@ def analyze_sets(
             Panel(
                 f"[yellow]No results found with minimum {min_set_size} titles.[/yellow]\n"
                 "[dim]Try lowering --min-titles[/dim]",
-                title=f"📊 Sets ({threshold}%+)",
+                title="📊 Sets",
                 border_style="yellow",
             )
         )
@@ -1157,6 +1167,12 @@ Examples:
         metavar="int",
         default=datetime.now().year,
         help="maximum year for titles to include",
+    )
+    filter_group.add_argument(
+        "--name",
+        action="append",
+        metavar="str",
+        help="limit to specific person names (repeatable, case-insensitive)",
     )
     filter_group.add_argument(
         "--only",
@@ -1254,6 +1270,7 @@ Examples:
             filters=filters,
             db_path=db_path,
             watchlist_file=args.watchlist,
+            filter_names=args.name,
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]Analysis interrupted by user.[/yellow]")
