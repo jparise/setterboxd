@@ -2,6 +2,9 @@
 
 Discover completed and near-complete "sets" of movies in your Letterboxd watchlist. Find directors and actors where you've seen most of their work, and get recommendations for the films you're missing.
 
+> [!NOTE]
+> This project is also a personal exploration into AI-assisted development (primarily using Claude Code), which a focus on iterative improvements coupled with manually review.
+
 ## What it does
 
 Setterboxd analyzes your Letterboxd watched films to find:
