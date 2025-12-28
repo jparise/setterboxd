@@ -323,7 +323,7 @@ def download_imdb_data(data_dir: Path, replace: bool = False) -> None:
             print(f"  Extracting {name}...", end="", flush=True)
             with gzip.open(gz_file, "rb") as f_in:
                 with open(tsv_file, "wb") as f_out:
-                    f_out.write(f_in.read())
+                    shutil.copyfileobj(f_in, f_out)
 
             gz_file.unlink()
             file_size_mb = tsv_file.stat().st_size / (1024 * 1024)
