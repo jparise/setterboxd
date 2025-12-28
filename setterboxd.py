@@ -1115,8 +1115,8 @@ def analyze_sets(
             )
 
             name_link = linkify(person_url, result["name"])
-            symbol = "●" if result["type"] == "director" else "○"
-            type_icon = dim(cyan(symbol))
+            symbol = "✫" if result["type"] == "actor" else " "
+            type_icon = cyan(symbol)
 
             table_rows.append([type_icon, name_link, progress, titles_preview])
 
