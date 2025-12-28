@@ -537,6 +537,7 @@ def _try_exact_match(
         WHERE (title_lower = ? OR original_title_lower = ?)
           AND year BETWEEN ? AND ?
           AND title_type IN ({sql_placeholders(filters.title_types)})
+        ORDER BY ABS(year - ?) ASC
         LIMIT 1
     """,
         (
@@ -545,6 +546,7 @@ def _try_exact_match(
             year - filters.year_tolerance,
             year + filters.year_tolerance,
             *filters.title_types,
+            year,
         ),
     )
     if result := cursor.fetchone():
