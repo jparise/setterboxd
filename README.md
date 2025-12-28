@@ -35,7 +35,7 @@ uv run setterboxd.py --rebuild
 cd setterboxd
 
 # Install dependencies
-pip install pandas rich
+pip install pandas
 
 # Download IMDb data and build database (~1GB download, takes 2-5 minutes)
 python setterboxd.py --rebuild

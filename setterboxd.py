@@ -3,7 +3,6 @@
 # requires-python = ">=3.11"
 # dependencies = [
 #     "pandas",
-#     "rich",
 # ]
 # ///
 """Letterboxd Set Analyzer
@@ -21,8 +20,10 @@ import argparse
 import enum
 import gzip
 import re
+import shutil
 import sqlite3
 import sys
+import traceback
 import urllib.request
 from collections import defaultdict
 from collections.abc import Sized
@@ -32,33 +33,99 @@ from pathlib import Path
 from typing import Literal, NamedTuple, Self, TextIO, TypedDict
 
 import pandas as pd
-from rich import box
-from rich.console import Console
-from rich.panel import Panel
-from rich.progress import (
-    BarColumn,
-    Progress,
-    SpinnerColumn,
-    TaskProgressColumn,
-    TextColumn,
-    track,
-)
-from rich.prompt import Confirm
-from rich.table import Table
-
-console = Console()
 
 
-def make_progress(**kwargs) -> Progress:
-    """Create a Progress instance with standard columns"""
-    return Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        console=console,
-        **kwargs,
-    )
+# ANSI escape codes for terminal formatting
+def green(text: str) -> str:
+    """Format text in green"""
+    return f"\033[32m{text}\033[0m"
+
+
+def red(text: str) -> str:
+    """Format text in red"""
+    return f"\033[31m{text}\033[0m"
+
+
+def yellow(text: str) -> str:
+    """Format text in yellow"""
+    return f"\033[33m{text}\033[0m"
+
+
+def cyan(text: str) -> str:
+    """Format text in cyan"""
+    return f"\033[36m{text}\033[0m"
+
+
+def magenta(text: str) -> str:
+    """Format text in magenta"""
+    return f"\033[35m{text}\033[0m"
+
+
+def bold(text: str) -> str:
+    """Format text in bold"""
+    return f"\033[1m{text}\033[0m"
+
+
+def dim(text: str) -> str:
+    """Format text dimmed"""
+    return f"\033[2m{text}\033[0m"
+
+
+def linkify(url: str, text: str) -> str:
+    """Create clickable terminal hyperlink using OSC 8 escape sequences"""
+    return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
+
+
+def confirm(prompt: str, default: bool = True) -> bool:
+    """Ask yes/no question with default value"""
+    suffix = "[Y/n]" if default else "[y/N]"
+    while True:
+        response = input(f"{prompt} {suffix}: ").strip().lower()
+        if not response:
+            return default
+        if response in ("y", "yes"):
+            return True
+        if response in ("n", "no"):
+            return False
+        print(yellow("Please answer 'y' or 'n'"))
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI escape codes from text for length calculation"""
+    # Remove ANSI color codes and OSC 8 hyperlinks
+    text = re.sub(r"\033\[[0-9;]*m", "", text)
+    return re.sub(r"\033\]8;;[^\033]*\033\\", "", text)
+
+
+def print_table(headers: list[str], rows: list[list[str]], col_widths: list[int]) -> None:
+    """Print a simple table with aligned columns"""
+    # Header row
+    header_parts = []
+    for header, width in zip(headers, col_widths, strict=True):
+        visual_len = len(strip_ansi(header))
+        padding = width - visual_len
+        header_parts.append(header + " " * padding)
+    print("  ".join(header_parts))
+
+    # Separator
+    total_width = sum(col_widths) + (len(col_widths) - 1) * 2  # 2 spaces between columns
+    print(dim("─" * total_width))
+
+    # Data rows
+    for row in rows:
+        row_parts = []
+        for cell, width in zip(row, col_widths, strict=True):
+            visual_len = len(strip_ansi(cell))
+            if visual_len > width:
+                # Truncate - we lose ANSI styling but keep it readable
+                plain = strip_ansi(cell)
+                truncated = plain[: width - 1] + "…"
+                row_parts.append(truncated)
+            else:
+                # Pad
+                padding = width - visual_len
+                row_parts.append(cell + " " * padding)
+        print("  ".join(row_parts))
 
 
 @enum.unique
@@ -233,60 +300,45 @@ def slugify(text: str) -> str:
     return slug.strip("-")
 
 
-def linkify(url: str, text: str) -> str:
-    """Wrap text in Rich clickable link markup"""
-    return f"[link={url}]{text}[/link]"
-
-
 def download_imdb_data(data_dir: Path, replace: bool = False) -> None:
-    """Download IMDb datasets with progress bars"""
+    """Download IMDb datasets"""
     data_dir.mkdir(exist_ok=True)
 
-    console.print("\n[bold cyan]Downloading IMDb Datasets[/bold cyan]")
-    console.print("Total size: ~1GB | This is a one-time setup\n")
+    print(f"\n{bold(cyan('Downloading IMDb Datasets'))}")
+    print("Total size: ~1GB | One-time setup\n")
 
-    with make_progress() as progress:
-        for name, url in IMDB_DATASETS.items():
-            gz_file = data_dir / f"{name}.tsv.gz"
-            tsv_file = data_dir / f"{name}.tsv"
+    for name, url in IMDB_DATASETS.items():
+        gz_file = data_dir / f"{name}.tsv.gz"
+        tsv_file = data_dir / f"{name}.tsv"
 
-            if tsv_file.exists() and not replace:
-                console.print(f"✓ [green]{name}.tsv[/green] already exists")
-                continue
+        if tsv_file.exists() and not replace:
+            print(f"✓ {green(name + '.tsv')} already exists")
+            continue
 
-            try:
-                download_task = progress.add_task(f"[cyan]Downloading {name}...", total=100)
+        try:
+            print(f"→ Downloading {name}...", end="", flush=True)
+            urllib.request.urlretrieve(url, gz_file)
+            print(" ✓")
 
-                def reporthook(block_num: int, block_size: int, total_size: int) -> None:
-                    if total_size > 0:
-                        percent = min(100, (block_num * block_size / total_size) * 100)
-                        progress.update(download_task, completed=percent)
+            print(f"  Extracting {name}...", end="", flush=True)
+            with gzip.open(gz_file, "rb") as f_in:
+                with open(tsv_file, "wb") as f_out:
+                    f_out.write(f_in.read())
 
-                urllib.request.urlretrieve(url, gz_file, reporthook)
-                progress.update(download_task, completed=100)
+            gz_file.unlink()
+            file_size_mb = tsv_file.stat().st_size / (1024 * 1024)
+            print(f" ✓ {green(f'({file_size_mb:.0f} MB)')}")
 
-                extract_task = progress.add_task(f"[cyan]Extracting {name}...", total=None)
-                with gzip.open(gz_file, "rb") as f_in:
-                    with open(tsv_file, "wb") as f_out:
-                        f_out.write(f_in.read())
-                progress.remove_task(extract_task)
-
-                gz_file.unlink()
-                progress.remove_task(download_task)
-
-                file_size_mb = tsv_file.stat().st_size / (1024 * 1024)
-                console.print(f"→ [green]{name}[/green] ({file_size_mb:.1f} MB)")
-
-            except Exception as e:
-                console.print(f"[red]Error downloading {name}: {e}[/red]")
-                sys.exit(1)
+        except Exception as e:
+            print(f"{red(f'Error downloading {name}: {e}')}")
+            sys.exit(1)
 
 
 def convert_to_sqlite(db_path: Path) -> None:
     """Convert TSV files to optimized SQLite database using pandas"""
     data_dir = db_path.parent
 
-    console.print("\n[bold cyan]Converting IMDb data to SQLite database[/bold cyan]")
+    print(f"\n{bold(cyan('Converting IMDb data to SQLite database'))}")
 
     if db_path.exists():
         db_path.unlink()
@@ -294,193 +346,143 @@ def convert_to_sqlite(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
-    with make_progress(transient=True) as progress:
-        # Load and process titles (basics) - 5 steps total
-        task = progress.add_task("[cyan]Loading titles...", total=5)
+    # Load and process titles (basics)
+    print("→ Loading titles...", end="", flush=True)
+    basics_df = pd.read_csv(
+        data_dir / "basics.tsv",
+        sep="\t",
+        na_values="\\N",
+        usecols=[  # type: ignore[call-overload]
+            "tconst",
+            "titleType",
+            "primaryTitle",
+            "originalTitle",
+            "startYear",
+        ],
+        dtype={
+            "tconst": "string",
+            "titleType": "category",
+            "primaryTitle": "string",
+            "originalTitle": "string",
+        },
+    )
+    print(" ✓")
 
-        # Step 1: Read CSV
-        basics_df = pd.read_csv(
-            data_dir / "basics.tsv",
+    print("  Processing titles...", end="", flush=True)
+    basics_df = basics_df[
+        basics_df["titleType"].isin(TitleType.__members__) & basics_df["primaryTitle"].notna()
+    ].copy()
+    basics_df["titleType"] = basics_df["titleType"].cat.remove_unused_categories()
+    basics_df["startYear"] = pd.to_numeric(basics_df["startYear"], errors="coerce").astype(  # type: ignore[union-attr]
+        "Int32"
+    )
+
+    basics_df["title_lower"] = basics_df["primaryTitle"].apply(normalize_title)
+    basics_df["original_title_lower"] = basics_df["originalTitle"].apply(normalize_title)
+    basics_df["title_type_int"] = basics_df["titleType"].map(lambda x: TitleType[x]).astype("Int32")
+
+    movies_df = basics_df[
+        [
+            "tconst",
+            "title_type_int",
+            "primaryTitle",
+            "title_lower",
+            "originalTitle",
+            "original_title_lower",
+            "startYear",
+        ]
+    ].rename(
+        columns={
+            "title_type_int": "title_type",
+            "primaryTitle": "title",
+            "originalTitle": "original_title",
+            "startYear": "year",
+        }
+    )
+    print(" ✓")
+
+    print("  Inserting titles...", end="", flush=True)
+    movies_df.to_sql("titles", conn, if_exists="replace", index=False)
+    cursor.execute("CREATE UNIQUE INDEX idx_titles_pk ON titles(tconst)")
+    print(f" ✓ {green(f'({len(movies_df):,} titles)')}")
+
+    # Load and process directors
+    print("→ Loading directors...", end="", flush=True)
+    crew_df = pd.read_csv(
+        data_dir / "crew.tsv",
+        sep="\t",
+        na_values="\\N",
+        usecols=["tconst", "directors"],  # type: ignore[call-overload]
+        dtype={"tconst": "string", "directors": "string"},
+    )
+    crew_df = crew_df[crew_df["directors"].notna()].copy()
+    crew_df["directors"] = crew_df["directors"].str.split(",")
+    directors_df = crew_df.explode("directors").reset_index(drop=True)
+    directors_df = directors_df.rename(columns={"directors": "director_id", "tconst": "title_id"})
+    directors_df = directors_df[["director_id", "title_id"]].drop_duplicates()
+    print(" ✓")
+
+    print("  Inserting directors...", end="", flush=True)
+    directors_df.to_sql("directors", conn, if_exists="replace", index=False)
+    print(f" ✓ {green(f'({len(directors_df):,} relationships)')}")
+
+    # Load and process actors (chunked due to size)
+    print("\n→ Loading actors (large file, this may take a minute)...")
+    chunk_size = 500_000
+    actors_chunks = []
+
+    for chunk_num, chunk in enumerate(
+        pd.read_csv(
+            data_dir / "principals.tsv",
             sep="\t",
             na_values="\\N",
-            usecols=[  # type: ignore[call-overload]
-                "tconst",
-                "titleType",
-                "primaryTitle",
-                "originalTitle",
-                "startYear",
-            ],
-            dtype={
-                "tconst": "string",
-                "titleType": "category",
-                "primaryTitle": "string",
-                "originalTitle": "string",
-            },
-        )
-        progress.update(task, advance=1)
-
-        # Step 2: Filter and clean data
-        basics_df = basics_df[
-            basics_df["titleType"].isin(TitleType.__members__) & basics_df["primaryTitle"].notna()
-        ].copy()
-        basics_df["titleType"] = basics_df["titleType"].cat.remove_unused_categories()
-        basics_df["startYear"] = pd.to_numeric(basics_df["startYear"], errors="coerce").astype(  # type: ignore[union-attr]
-            "Int32"
-        )
-        progress.update(
-            task, advance=1, description=f"[cyan]Processing {len(basics_df):,} titles..."
-        )
-
-        # Step 3: Create normalized columns
-        basics_df["title_lower"] = basics_df["primaryTitle"].apply(normalize_title)
-        basics_df["original_title_lower"] = basics_df["originalTitle"].apply(normalize_title)
-        basics_df["title_type_int"] = (
-            basics_df["titleType"].map(lambda x: TitleType[x]).astype("Int32")
-        )
-        progress.update(task, advance=1)
-
-        # Step 4: Prepare for SQL insertion
-        movies_df = basics_df[
-            [
-                "tconst",
-                "title_type_int",
-                "primaryTitle",
-                "title_lower",
-                "originalTitle",
-                "original_title_lower",
-                "startYear",
-            ]
-        ].rename(
-            columns={
-                "title_type_int": "title_type",
-                "primaryTitle": "title",
-                "originalTitle": "original_title",
-                "startYear": "year",
-            }
-        )
-        progress.update(
-            task, advance=1, description=f"[cyan]Inserting {len(movies_df):,} titles..."
-        )
-
-        # Step 5: Insert to database and create index
-        movies_df.to_sql("titles", conn, if_exists="replace", index=False)
-        cursor.execute("CREATE UNIQUE INDEX idx_titles_pk ON titles(tconst)")
-        progress.update(task, advance=1)
-
-    console.print(f"✓ Inserted [cyan]{len(movies_df):,}[/cyan] titles")
-
-    with make_progress(transient=True) as progress:
-        # Load and process directors - 4 steps total
-        task = progress.add_task("[cyan]Loading directors...", total=4)
-
-        # Step 1: Read CSV
-        crew_df = pd.read_csv(
-            data_dir / "crew.tsv",
-            sep="\t",
-            na_values="\\N",
-            usecols=["tconst", "directors"],  # type: ignore[call-overload]
-            dtype={"tconst": "string", "directors": "string"},
-        )
-        progress.update(task, advance=1)
-
-        # Step 2: Filter to non-null directors
-        crew_df = crew_df[crew_df["directors"].notna()].copy()
-        progress.update(task, advance=1, description="[cyan]Denormalizing directors...")
-
-        # Step 3: Explode comma-separated director IDs into separate rows (vectorized pandas)
-        crew_df["directors"] = crew_df["directors"].str.split(",")
-        directors_df = crew_df.explode("directors").reset_index(drop=True)
-        directors_df = directors_df.rename(
-            columns={"directors": "director_id", "tconst": "title_id"}
-        )
-        directors_df = directors_df[["director_id", "title_id"]].drop_duplicates()
-        progress.update(
-            task, advance=1, description=f"[cyan]Inserting {len(directors_df):,} pairs..."
-        )
-
-        # Step 4: Insert to database
-        directors_df.to_sql("directors", conn, if_exists="replace", index=False)
-        progress.update(task, advance=1)
-
-    console.print(f"✓ Inserted [cyan]{len(directors_df):,}[/cyan] director-title relationships")
-
-    with make_progress(transient=True) as progress:
-        # Load and process actors (chunked due to size) - with progress tracking
-        # Principals file has ~95M rows (500k chunk size = ~191 chunks)
-        chunk_size = 500_000
-        expected_chunks = 191  # Based on known file size, avoids expensive line counting
-        total_steps = expected_chunks + 5  # Add buffer for combine + insert steps
-
-        task = progress.add_task("[cyan]Loading actors...", total=total_steps)
-        actors_chunks = []
-
-        for chunk_num, chunk in enumerate(
-            pd.read_csv(
-                data_dir / "principals.tsv",
-                sep="\t",
-                na_values="\\N",
-                usecols=["tconst", "nconst", "category"],  # type: ignore[call-overload]
-                dtype={"tconst": "string", "nconst": "string", "category": "category"},
-                chunksize=chunk_size,
-            ),
-            start=1,
-        ):
-            progress.update(
-                task,
-                completed=chunk_num,
-                description=f"[cyan]Processing chunk {chunk_num}...",
+            usecols=["tconst", "nconst", "category"],  # type: ignore[call-overload]
+            dtype={"tconst": "string", "nconst": "string", "category": "category"},
+            chunksize=chunk_size,
+        ),
+        start=1,
+    ):
+        # Print progress every 25 chunks for better feedback
+        if chunk_num % 25 == 0:
+            rows_processed = chunk_num * chunk_size
+            print(
+                f"  {dim(f'Processing actors... ({rows_processed:,} rows)')}", end="\r", flush=True
             )
 
-            # Filter to actors/actresses only
-            filtered = chunk[chunk["category"].isin(["actor", "actress"])].copy()
-            filtered = filtered[["nconst", "tconst"]].rename(
-                columns={"nconst": "actor_id", "tconst": "title_id"}
-            )
-            actors_chunks.append(filtered)
-
-        progress.update(task, completed=expected_chunks, description="[cyan]Combining actors...")
-        actors_df = pd.concat(actors_chunks, ignore_index=True).drop_duplicates()
-
-        progress.update(
-            task,
-            completed=expected_chunks + 3,
-            description=f"[cyan]Inserting {len(actors_df):,} pairs...",
+        # Filter to actors/actresses only
+        filtered = chunk[chunk["category"].isin(["actor", "actress"])].copy()
+        filtered = filtered[["nconst", "tconst"]].rename(
+            columns={"nconst": "actor_id", "tconst": "title_id"}
         )
-        actors_df.to_sql("actors", conn, if_exists="replace", index=False)
-        progress.update(task, completed=total_steps)
+        actors_chunks.append(filtered)
 
-    console.print(f"✓ Inserted [cyan]{len(actors_df):,}[/cyan] actor-title relationships")
+    print("  Combining and deduplicating...", end="", flush=True)
+    actors_df = pd.concat(actors_chunks, ignore_index=True).drop_duplicates()
+    print(" ✓")
 
-    with make_progress(transient=True) as progress:
-        # Load and process names - 4 steps total
-        task = progress.add_task("[cyan]Loading names...", total=4)
+    print("  Inserting actors...", end="", flush=True)
+    actors_df.to_sql("actors", conn, if_exists="replace", index=False)
+    print(f" ✓ {green(f'({len(actors_df):,} relationships)')}")
 
-        # Step 1: Read CSV
-        names_df = pd.read_csv(
-            data_dir / "names.tsv",
-            sep="\t",
-            na_values="\\N",
-            usecols=["nconst", "primaryName"],  # type: ignore[call-overload]
-            dtype={"nconst": "string", "primaryName": "string"},
-        )
-        progress.update(task, advance=1)
+    # Load and process names
+    print("→ Loading names...", end="", flush=True)
+    names_df = pd.read_csv(
+        data_dir / "names.tsv",
+        sep="\t",
+        na_values="\\N",
+        usecols=["nconst", "primaryName"],  # type: ignore[call-overload]
+        dtype={"nconst": "string", "primaryName": "string"},
+    )
+    names_df = names_df[names_df["primaryName"].notna()].copy()
+    names_df = names_df.rename(columns={"nconst": "name_id", "primaryName": "name"})
+    print(" ✓")
 
-        # Step 2: Filter and rename columns
-        names_df = names_df[names_df["primaryName"].notna()].copy()
-        names_df = names_df.rename(columns={"nconst": "name_id", "primaryName": "name"})
-        progress.update(task, advance=1, description=f"[cyan]Inserting {len(names_df):,} names...")
+    print("  Inserting names...", end="", flush=True)
+    names_df.to_sql("names", conn, if_exists="replace", index=False)
+    cursor.execute("CREATE UNIQUE INDEX idx_names_pk ON names(name_id)")
+    print(f" ✓ {green(f'({len(names_df):,} names)')}")
 
-        # Step 3: Insert to database
-        names_df.to_sql("names", conn, if_exists="replace", index=False)
-        progress.update(task, advance=1)
-
-        # Step 4: Create primary key index
-        cursor.execute("CREATE UNIQUE INDEX idx_names_pk ON names(name_id)")
-        progress.update(task, advance=1)
-
-    console.print(f"✓ Inserted [cyan]{len(names_df):,}[/cyan] names")
-
-    # Create indexes with transient progress bar
+    # Create indexes
     indexes = [
         # Composite indexes for the most common query patterns
         ("idx_titles_title_year", "titles(title_lower, year)"),
@@ -498,24 +500,22 @@ def convert_to_sqlite(db_path: Path) -> None:
         ("idx_actors_title", "actors(title_id)"),
     ]
 
-    with make_progress(transient=True) as progress:
-        task = progress.add_task("[cyan]Creating indexes (2-3 minutes)...", total=len(indexes))
-        for idx_name, idx_def in indexes:
-            cursor.execute(f"CREATE INDEX {idx_name} ON {idx_def}")
-            progress.update(task, advance=1)
-
-    console.print("✓ Created indexes")
+    print("\n→ Creating indexes (2-3 minutes)...", end="", flush=True)
+    for i, (idx_name, idx_def) in enumerate(indexes, 1):
+        print(f"  {dim(f'Creating index {i}/{len(indexes)}...')}", end="\r", flush=True)
+        cursor.execute(f"CREATE INDEX {idx_name} ON {idx_def}")
+    # Clear the progress line and show completion
+    print(f"{'→ Creating indexes (2-3 minutes)...'}{' ' * 20} ✓")
 
     # Gather statistics for query optimizer
-    with console.status("[cyan]Gathering statistics for query optimizer..."):
-        cursor.execute("ANALYZE")
+    print("  Gathering statistics...", end="", flush=True)
+    cursor.execute("ANALYZE")
+    print(" ✓")
 
     conn.commit()
     conn.close()
 
-    console.print(
-        f"\n[bold green]✓ SQLite database ({db_path}) created successfully![/bold green]\n"
-    )
+    print(f"\n{bold(green(f'✓ SQLite database ({db_path}) created successfully!'))}\n")
 
 
 def get_db_connection(db_path: Path) -> sqlite3.Connection:
@@ -724,15 +724,17 @@ def format_title_list(
     for film in sorted_films[:count]:
         url = film_to_letterboxd_url(film.title, film.year, min_years.get(film.title))
         if film in watchlist_films:
-            # Wrap in bold tags
-            url = f"[bold]{url}[/bold]"
+            # Wrap in bold
+            url = bold(url)
         film_links.append(url)
 
-    formatted = "[dim], [/dim]".join(film_links)
+    # Join with dimmed separators
+    separator = dim(", ")
+    formatted = separator.join(film_links)
 
     if len(sorted_films) > count:
-        more_text = f"(+{len(sorted_films) - count} more)"
-        formatted += f" [dim]{linkify(more_url, more_text)}[/dim]"
+        more_text = f"(+{len(sorted_films) - count})"
+        formatted += f"{dim(', ')}{dim(linkify(more_url, more_text))}"
 
     return formatted
 
@@ -763,69 +765,36 @@ def collect_people_from_watched_movies(
     id_column = f"{person_type}_id"
     where_clause, filter_params = filters.to_sql()
 
-    # Get count for progress bar
-    with console.status(f"[cyan]Counting {person_type}s in watched titles..."):
-        cursor.execute(
-            f"""
-            SELECT COUNT(*)
-            FROM {table_name} t
-            JOIN titles m ON t.title_id = m.tconst
-            WHERE t.title_id IN ({sql_placeholders(tconsts)})
-              AND {where_clause}
-        """,
-            [*tconsts, *filter_params],
-        )
-        total_entries = cursor.fetchone()[0]
+    # Fetch people from watched titles
+    print(f"Collecting {person_type}s from watched titles...", end="", flush=True)
+    cursor.execute(
+        f"""
+        SELECT t.{id_column}, n.name, m.title, m.year
+        FROM {table_name} t
+        JOIN names n ON t.{id_column} = n.name_id
+        JOIN titles m ON t.title_id = m.tconst
+        WHERE t.title_id IN ({sql_placeholders(tconsts)})
+          AND {where_clause}
+    """,
+        [*tconsts, *filter_params],
+    )
 
-    # Fetch with progress bar (transient - disappears after completion)
-    with make_progress(transient=True) as progress:
-        task = progress.add_task(
-            f"[cyan]Collecting {total_entries:,} {person_type} entries...",
-            total=total_entries,
-        )
-
-        cursor.execute(
-            f"""
-            SELECT t.{id_column}, n.name, m.title, m.year
-            FROM {table_name} t
-            JOIN names n ON t.{id_column} = n.name_id
-            JOIN titles m ON t.title_id = m.tconst
-            WHERE t.title_id IN ({sql_placeholders(tconsts)})
-              AND {where_clause}
-        """,
-            [*tconsts, *filter_params],
-        )
-
-        # Build dict of people by ID directly
-        people_by_id: dict[str, Person] = {}
-        people_names: set[str] = set()
-        processed = 0
-        while True:
-            rows = cursor.fetchmany(1000)
-            if not rows:
-                break
-            for person_id, person_name, movie_title, movie_year in rows:
-                people_names.add(person_name)
-                if person_id not in people_by_id:
-                    people_by_id[person_id] = {"name": person_name, "watched": set()}
-                people_by_id[person_id]["watched"].add(Film(movie_title, movie_year))
-            processed += len(rows)
-            progress.update(task, completed=processed)
-
-    console.print(f"✓ Found [cyan]{len(people_names)}[/cyan] {person_type}s in your watched titles")
+    # Build dict of people by ID directly
+    people_by_id: dict[str, Person] = {}
+    people_names: set[str] = set()
+    for person_id, person_name, movie_title, movie_year in cursor.fetchall():
+        people_names.add(person_name)
+        if person_id not in people_by_id:
+            people_by_id[person_id] = {"name": person_name, "watched": set()}
+        people_by_id[person_id]["watched"].add(Film(movie_title, movie_year))
+    print(f" ✓ {green(f'({len(people_names)} {person_type}s)')}")
 
     # Filter to people worth analyzing
-    candidates = {
+    return {
         person_id: person
         for person_id, person in people_by_id.items()
         if len(person["watched"]) >= min_watched
     }
-
-    console.print(
-        f"✓ Analyzing [cyan]{len(candidates)}[/cyan] {person_type}s with {min_watched}+ watched titles"
-    )
-
-    return candidates
 
 
 def fetch_filmographies_bulk(
@@ -834,28 +803,29 @@ def fetch_filmographies_bulk(
     table_name: Literal["directors", "actors"],
     person_type: Literal["director", "actor"],
     filters: Filters,
+    min_watched: int,
 ) -> dict[str, set[Film]]:
     """Fetch filmographies for multiple people in a single bulk query."""
-    with console.status(f"[cyan]Fetching {person_type} filmographies..."):
-        id_column = f"{person_type}_id"
-        where_clause, filter_params = filters.to_sql()
+    print(f"Fetching {person_type} filmographies...", end="", flush=True)
+    id_column = f"{person_type}_id"
+    where_clause, filter_params = filters.to_sql()
 
-        cursor.execute(
-            f"""
-            SELECT t.{id_column}, m.title, m.year
-            FROM {table_name} t
-            JOIN titles m ON t.title_id = m.tconst
-            WHERE t.{id_column} IN ({sql_placeholders(candidates)})
-              AND {where_clause}
-        """,
-            [*candidates.keys(), *filter_params],
-        )
+    cursor.execute(
+        f"""
+        SELECT t.{id_column}, m.title, m.year
+        FROM {table_name} t
+        JOIN titles m ON t.title_id = m.tconst
+        WHERE t.{id_column} IN ({sql_placeholders(candidates)})
+          AND {where_clause}
+    """,
+        [*candidates.keys(), *filter_params],
+    )
 
-        filmographies = defaultdict(set)
-        for person_id, title, year in cursor.fetchall():
-            filmographies[person_id].add(Film(title, year))
+    filmographies = defaultdict(set)
+    for person_id, title, year in cursor.fetchall():
+        filmographies[person_id].add(Film(title, year))
+    print(f" ✓ {green(f'({len(filmographies)} {person_type}s with {min_watched}+ watched)')}")
 
-    console.print(f"✓ Fetched filmographies for {len(filmographies)} {person_type}s")
     return filmographies
 
 
@@ -878,27 +848,26 @@ def calculate_completion_results(
         List of result dictionaries
     """
     results: list[PersonResult] = []
-    with console.status("[cyan]Calculating completion percentages..."):
-        for person_id, person_data in candidates.items():
-            total_films = filmographies.get(person_id, set())
+    for person_id, person_data in candidates.items():
+        total_films = filmographies.get(person_id, set())
 
-            if len(total_films) < min_set_size:
-                continue
+        if len(total_films) < min_set_size:
+            continue
 
-            watched = person_data["watched"]
-            completion = len(watched) / len(total_films)
-            missing = total_films - watched
+        watched = person_data["watched"]
+        completion = len(watched) / len(total_films)
+        missing = total_films - watched
 
-            results.append(
-                {
-                    "name": person_data["name"],
-                    "watched": len(watched),
-                    "total": len(total_films),
-                    "completion": completion,
-                    "missing": missing,
-                    "type": person_type,
-                }
-            )
+        results.append(
+            {
+                "name": person_data["name"],
+                "watched": len(watched),
+                "total": len(total_films),
+                "completion": completion,
+                "missing": missing,
+                "type": person_type,
+            }
+        )
 
     return results
 
@@ -921,13 +890,9 @@ def analyze_person_type(
         filters=filters,
     )
     filmographies = fetch_filmographies_bulk(
-        cursor, candidates, person_type.table_name, person_type.value, filters
+        cursor, candidates, person_type.table_name, person_type.value, filters, min_watched
     )
-    results = calculate_completion_results(
-        candidates, filmographies, person_type.value, min_set_size
-    )
-    console.print(f"✓ Completed {person_type.value} analysis")
-    return results
+    return calculate_completion_results(candidates, filmographies, person_type.value, min_set_size)
 
 
 def analyze_sets(
@@ -945,32 +910,48 @@ def analyze_sets(
     analyze_directors = only is None or only == "directors"
     analyze_actors = only is None or only == "actors"
 
-    console.print("\n[bold magenta]🎬 Letterboxd Set Analyzer[/bold magenta]\n")
+    print(f"\n{bold(magenta('🎬 Letterboxd Set Analyzer'))}\n")
 
     watched_df = pd.read_csv(watched_file)
     watchlist_df = pd.read_csv(watchlist_file) if watchlist_file else None
 
-    watchlist_msg = (
-        f" and [cyan]{len(watchlist_df)}[/cyan] watchlisted" if watchlist_df is not None else ""
-    )
-    console.print(f"✓ Found [cyan]{len(watched_df)}[/cyan] watched{watchlist_msg} titles\n")
-
-    # Connect to SQLite database (instant!)
+    # Connect to SQLite database to get dataset date
     conn = get_db_connection(db_path)
     cursor = conn.cursor()
+
+    # Get IMDb dataset date from database file modification time
+    db_modified_time = datetime.fromtimestamp(Path(db_path).stat().st_mtime)
+    dataset_date = db_modified_time.strftime("%Y-%m-%d")
+
+    # Build and print filter info line
+    type_names = [t.name for t in filters.title_types]
+    types_str = ", ".join(type_names)
+    filter_parts = [
+        types_str,
+        str(filters.years),
+        f"≥{threshold}% complete",
+        f"≥{min_set_size} titles",
+    ]
+
+    # Add person type filter if specified
+    if only:
+        filter_parts.append(f"{only} only")
+
+    # Add name filter if specified
+    if filter_names:
+        names_str = ", ".join(filter_names)
+        filter_parts.append(f"names: {names_str}")
+
+    filter_parts.append(f"IMDb {dataset_date}")
+    filter_info = f" {dim('•')} ".join(filter_parts)
+    print(f"{magenta('▶')} {filter_info}")
 
     # Match titles using SQLite indexed queries (FAST!)
     watched_tconsts: set[str] = set()
     watchlist_films: set[Film] = set()
     unmatched: list[str] = []
 
-    for _idx, row in track(
-        watched_df.iterrows(),
-        description="[cyan]Matching titles to IMDb...",
-        total=len(watched_df),
-        console=console,
-        transient=True,
-    ):
+    for _idx, row in watched_df.iterrows():
         title = str(row["Name"])
         year = int(row["Year"]) if pd.notna(row["Year"]) else None  # type: ignore[arg-type]
 
@@ -980,22 +961,19 @@ def analyze_sets(
             year_str = f" ({year})" if year is not None else ""
             unmatched.append(f"{title}{year_str}")
 
-    # Get IMDb dataset date from database file modification time
-    db_modified_time = datetime.fromtimestamp(Path(db_path).stat().st_mtime)
-    dataset_date = db_modified_time.strftime("%Y-%m-%d")
-
-    type_names = [t.name for t in filters.title_types]
-    console.print(
-        f"✓ Matched [green]{len(watched_tconsts)}/{len(watched_df)}[/green] titles "
-        f"([cyan]{len(watched_tconsts) / len(watched_df) * 100:.1f}%[/cyan]) "
-        f"[dim]({','.join(type_names)} • {filters.years} • IMDb {dataset_date})[/dim]"
+    # Print match results
+    watchlist_msg = (
+        f" and {bold(str(len(watchlist_df)))} watchlisted" if watchlist_df is not None else ""
+    )
+    print(
+        f"{magenta('↳')} matched {bold(f'{len(watched_tconsts)}/{len(watched_df)}')} watched{watchlist_msg} titles\n"
     )
 
     if unmatched and debug:
-        console.print(f"\n[yellow]⚠ Unmatched titles ({len(unmatched)}):[/yellow]")
+        print(f"\n{yellow(f'⚠ Unmatched titles ({len(unmatched)}):')}")
         for title in sorted(unmatched):
-            console.print(f"  [dim]•[/dim] {title}")
-        console.print()
+            print(f"  {dim('•')} {title}")
+        print()
 
     # Match watchlist films to IMDb if provided
     if watchlist_df is not None:
@@ -1012,7 +990,7 @@ def analyze_sets(
     )
 
     if analyze_actors:
-        console.print()
+        print()
 
     actor_results = (
         analyze_person_type(cursor, PersonType.actor, watched_tconsts, 5, min_set_size, filters)
@@ -1025,25 +1003,33 @@ def analyze_sets(
     all_results.sort(key=lambda x: x["completion"], reverse=True)
 
     if debug:
-        console.print(
-            f"\n[dim]Debug: Total results: {len(all_results)} "
-            f"({len(director_results)} directors, {len(actor_results)} actors)[/dim]"
+        print(
+            f"\n{
+                dim(
+                    f'Debug: Total results: {len(all_results)} '
+                    f'({len(director_results)} directors, {len(actor_results)} actors)'
+                )
+            }"
         )
         if director_results:
             director_completions = [r["completion"] * 100 for r in director_results]
-            console.print(
-                f"[dim]Debug: Director completion range: "
-                f"{min(director_completions):.1f}% - {max(director_completions):.1f}%[/dim]"
+            print(
+                dim(
+                    f"Debug: Director completion range: "
+                    f"{min(director_completions):.1f}% - {max(director_completions):.1f}%"
+                )
             )
         if actor_results:
             actor_completions = [r["completion"] * 100 for r in actor_results]
-            console.print(
-                f"[dim]Debug: Actor completion range: "
-                f"{min(actor_completions):.1f}% - {max(actor_completions):.1f}%[/dim]"
+            print(
+                dim(
+                    f"Debug: Actor completion range: "
+                    f"{min(actor_completions):.1f}% - {max(actor_completions):.1f}%"
+                )
             )
 
     # Filter results by threshold or names
-    console.print()
+    print()
     if filter_names:
         name_patterns = [
             re.compile(rf"\b{re.escape(name.strip())}\b", re.IGNORECASE) for name in filter_names
@@ -1065,32 +1051,32 @@ def analyze_sets(
         completed_actors = [r for r in completed if r["type"] == "actor"]
         near_complete_directors = [r for r in near_complete if r["type"] == "director"]
         near_complete_actors = [r for r in near_complete if r["type"] == "actor"]
-        console.print(
-            f"[dim]Debug: Completed: {len(completed_directors)} directors, "
-            f"{len(completed_actors)} actors[/dim]"
+        print(
+            dim(
+                f"Debug: Completed: {len(completed_directors)} directors, "
+                f"{len(completed_actors)} actors"
+            )
         )
-        console.print(
-            f"[dim]Debug: Near-complete: {len(near_complete_directors)} directors, "
-            f"{len(near_complete_actors)} actors[/dim]"
+        print(
+            dim(
+                f"Debug: Near-complete: {len(near_complete_directors)} directors, "
+                f"{len(near_complete_actors)} actors"
+            )
         )
 
     if filtered_results:
         display_results = filtered_results[:max_results]
 
-        table = Table(
-            box=box.ROUNDED,
-            border_style="dim",
-            expand=True,
-        )
         # Calculate available width for Titles column
-        # Terminal width - (Name: 30 + Progress: 13 + borders/padding: ~10)
-        terminal_width = console.width
-        fixed_columns_width = 30 + 13 + 10  # Name + Progress + overhead
-        available_width = max(40, terminal_width - fixed_columns_width)  # Minimum 40 chars
+        col_widths = [1, 29, 20, 0]  # Type, Name, Progress, Titles (calculated)
+        terminal_width = shutil.get_terminal_size((80, 24)).columns
+        separator_width = (len(col_widths) - 1) * 2  # 2 spaces between each column
+        fixed_width = sum(col_widths[:3]) + separator_width
+        available_width = max(40, terminal_width - fixed_width)
+        col_widths[3] = available_width
 
-        table.add_column("Name", style="yellow", max_width=30, no_wrap=False)
-        table.add_column("Progress", width=13, no_wrap=True)
-        table.add_column("Unwatched Titles", width=available_width, no_wrap=False)
+        headers = ["", "Name", "Progress", "Unwatched Titles"]
+        table_rows = []
 
         # Build min_years lookup for URL disambiguation by querying database
         unique_film_titles = set()
@@ -1099,17 +1085,19 @@ def analyze_sets(
                 unique_film_titles.add(film.title)
         min_years = fetch_min_years_from_db(cursor, unique_film_titles)
 
+        # Color map for completion percentages
+        color_map = [(90, green), (80, cyan), (70, yellow), (50, magenta), (0, red)]
+
         for result in display_results:
             percent = result["completion"] * 100
             watched = result["watched"]
             total = result["total"]
 
             # Color-code percentage based on completion level
-            colors = [(90, "green"), (80, "cyan"), (70, "yellow"), (50, "magenta"), (0, "red")]
-            color = next(c for score, c in colors if percent >= score)
+            color_func = next(c for score, c in color_map if percent >= score)
 
             fraction = f"({watched}/{total})"
-            progress = f"[{color}][bold]{int(percent):>3}%[/bold] {fraction:>9}[/{color}]"
+            progress = f"{color_func(bold(f'{int(percent):>3}%'))} {dim(f'{fraction:>9}')}"
 
             person_url = f"https://letterboxd.com/{result['type']}/{slugify(result['name'])}/"
 
@@ -1127,40 +1115,24 @@ def analyze_sets(
             )
 
             name_link = linkify(person_url, result["name"])
-            emoji = "🎬" if result["type"] == "director" else "👤"
-            name_display = f"[dim]{emoji}[/dim] {name_link}"
+            symbol = "●" if result["type"] == "director" else "○"
+            type_icon = dim(cyan(symbol))
 
-            table.add_row(
-                name_display,
-                progress,
-                titles_preview,
-            )
+            table_rows.append([type_icon, name_link, progress, titles_preview])
 
-        console.print(table)
+        print_table(headers, table_rows, col_widths)
     elif all_results:
         filter_desc = "filtered by name" if filter_names else f"{threshold}%"
         max_completion = max(r["completion"] for r in all_results) * 100
         suggested_threshold = int(max_completion * 0.9)  # Suggest 90% of max
-        console.print(
-            Panel(
-                f"[yellow]No sets found ({filter_desc}).[/yellow]\n"
-                f"[dim]Highest completion: {max_completion:.0f}%[/dim]\n"
-                f"[dim]Try: --threshold {suggested_threshold}[/dim]",
-                title=f"📊 Sets ({filter_desc})",
-                border_style="yellow",
-            )
-        )
+        print(f"\n📊 {yellow(f'No sets found ({filter_desc}).')}")
+        print(f"  {dim(f'Highest completion: {max_completion:.0f}%')}")
+        print(f"  {dim(f'Try: --threshold {suggested_threshold}')}\n")
     else:
-        console.print(
-            Panel(
-                f"[yellow]No results found with minimum {min_set_size} titles.[/yellow]\n"
-                "[dim]Try lowering --min-titles[/dim]",
-                title="📊 Sets",
-                border_style="yellow",
-            )
-        )
+        print(f"\n📊 {yellow(f'No results found with minimum {min_set_size} titles.')}")
+        print(f"  {dim('Try lowering --min-titles')}\n")
 
-    console.print()
+    print()
     return all_results
 
 
@@ -1287,7 +1259,7 @@ Examples:
         if has_all_data:
             oldest_file = min(dataset_files.values(), key=lambda f: f.stat().st_mtime)
             file_date = datetime.fromtimestamp(oldest_file.stat().st_mtime).strftime("%Y-%m-%d")
-            if Confirm.ask(f"Download fresh data? (current: {file_date})", default=False):
+            if confirm(f"Download fresh data? (current: {file_date})", default=False):
                 download_imdb_data(args.data_dir, replace=True)
         else:
             download_imdb_data(args.data_dir)
@@ -1295,15 +1267,13 @@ Examples:
     if args.rebuild or (has_all_data and not db_path.exists()):
         convert_to_sqlite(db_path)
         if args.rebuild:
-            console.print(
-                "[bold green]✓ Setup complete![/bold green] You can now analyze your watch history.\n"
-            )
+            print(f"{bold(green('✓ Setup complete!'))} You can now analyze your watch history.\n")
             sys.exit(0)
 
     if not db_path.exists():
-        console.print("[red]Error: IMDb database not found.[/red]")
-        console.print("\nPlease run with [cyan]--rebuild[/cyan] first:")
-        console.print(f"  [dim]python {sys.argv[0]} --rebuild[/dim]\n")
+        print(red("Error: IMDb database not found."))
+        print("\nPlease run with --rebuild first:")
+        print(f"  {dim(f'python {sys.argv[0]} --rebuild')}\n")
         sys.exit(1)
 
     if not args.file:
@@ -1331,10 +1301,11 @@ Examples:
             filter_names=args.name,
         )
     except KeyboardInterrupt:
-        console.print("\n[yellow]Analysis interrupted by user.[/yellow]")
+        print(f"\n{yellow('Analysis interrupted by user.')}")
         sys.exit(0)
     except Exception:
-        console.print_exception()
+        print(red("Error:"), file=sys.stderr)
+        traceback.print_exc()
         sys.exit(1)
 
 
