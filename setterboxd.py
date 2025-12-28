@@ -1013,7 +1013,7 @@ def analyze_sets(
     )
 
     if unmatched and debug:
-        print(f"\n{yellow(f'⚠ Unmatched titles ({len(unmatched)}):')}")
+        print(f"{yellow(f'⚠ Unmatched titles ({len(unmatched)}):')}")
         for title in sorted(unmatched):
             print(f"  {dim('•')} {title}")
         print()
@@ -1075,7 +1075,6 @@ def analyze_sets(
             )
 
     # Filter results by threshold or names
-    print()
     if filter_names:
         name_patterns = [
             re.compile(rf"\b{re.escape(name.strip())}\b", re.IGNORECASE) for name in filter_names
@@ -1110,6 +1109,7 @@ def analyze_sets(
             )
         )
 
+    print()
     if filtered_results:
         display_results = filtered_results[:max_results]
 
