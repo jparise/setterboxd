@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 # /// script
 # requires-python = ">=3.11"
-# dependencies = [
-#     "pandas",
-# ]
 # ///
 """Letterboxd Set Analyzer
 
@@ -17,12 +14,14 @@ you already enjoy.
 """
 
 import argparse
+import csv
 import enum
 import gzip
 import re
 import shutil
 import sqlite3
 import sys
+import time
 import traceback
 import urllib.request
 from collections import defaultdict
@@ -31,8 +30,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, NamedTuple, Self, TextIO, TypedDict
-
-import pandas as pd
 
 
 # ANSI escape codes for terminal formatting
@@ -74,6 +71,26 @@ def dim(text: str) -> str:
 def linkify(url: str, text: str) -> str:
     """Create clickable terminal hyperlink using OSC 8 escape sequences"""
     return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
+
+
+def read_imdb_tsv(filepath: Path, cols: tuple[str, ...], chunksize: int = 100_000):
+    """Read IMDb TSV file, yielding chunks as lists of tuples."""
+    with open(filepath, encoding="utf-8") as f:
+        header = f.readline().rstrip("\n").split("\t")
+        indices = [header.index(col) for col in cols]
+
+        chunk = []
+        for line in f:
+            fields = line.rstrip("\n").split("\t")
+            row = tuple(fields[i] for i in indices)
+            chunk.append(row)
+
+            if len(chunk) >= chunksize:
+                yield chunk
+                chunk = []
+
+        if chunk:
+            yield chunk
 
 
 def confirm(prompt: str, default: bool = True) -> bool:
@@ -335,10 +352,12 @@ def download_imdb_data(data_dir: Path, replace: bool = False) -> None:
 
 
 def convert_to_sqlite(db_path: Path) -> None:
-    """Convert TSV files to optimized SQLite database using pandas"""
+    """Convert IMDb TSV files to optimized SQLite database"""
     data_dir = db_path.parent
 
     print(f"\n{bold(cyan('Converting IMDb data to SQLite database'))}")
+
+    overall_start = time.time()
 
     if db_path.exists():
         db_path.unlink()
@@ -346,141 +365,165 @@ def convert_to_sqlite(db_path: Path) -> None:
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
+    # Performance optimizations for bulk inserts
+    cursor.execute("PRAGMA journal_mode = WAL")  # Write-Ahead Logging for better concurrency
+    cursor.execute("PRAGMA synchronous = OFF")  # Maximum speed (safe for one-time rebuild)
+    cursor.execute("PRAGMA cache_size = -64000")  # 64MB cache
+    cursor.execute("PRAGMA temp_store = MEMORY")  # Keep temp tables in memory
+    cursor.execute("PRAGMA locking_mode = EXCLUSIVE")  # No other processes during build
+
     # Load and process titles (basics)
-    print("→ Loading titles...", end="", flush=True)
-    basics_df = pd.read_csv(
+    print("→ Loading titles...")
+    titles_start = time.time()
+    print("  [1/2] Reading and filtering...", end="", flush=True)
+    cursor.execute("""
+        CREATE TABLE titles (
+            tconst TEXT PRIMARY KEY,
+            title_type INTEGER,
+            title TEXT,
+            title_lower TEXT,
+            original_title TEXT,
+            original_title_lower TEXT,
+            year INTEGER
+        )
+    """)
+
+    titles = []
+    for chunk in read_imdb_tsv(
         data_dir / "basics.tsv",
-        sep="\t",
-        na_values="\\N",
-        usecols=[  # type: ignore[call-overload]
-            "tconst",
-            "titleType",
-            "primaryTitle",
-            "originalTitle",
-            "startYear",
-        ],
-        dtype={
-            "tconst": "string",
-            "titleType": "category",
-            "primaryTitle": "string",
-            "originalTitle": "string",
-        },
-    )
-    print(" ✓")
+        cols=("tconst", "titleType", "primaryTitle", "originalTitle", "startYear"),
+    ):
+        for row in chunk:
+            # Filter (indices: 0=tconst, 1=titleType, 2=primaryTitle, 3=originalTitle, 4=startYear)
+            if row[1] not in TitleType.__members__ or not row[2] or row[2] == "\\N":
+                continue
 
-    print("  Processing titles...", end="", flush=True)
-    basics_df = basics_df[
-        basics_df["titleType"].isin(TitleType.__members__) & basics_df["primaryTitle"].notna()
-    ].copy()
-    basics_df["titleType"] = basics_df["titleType"].cat.remove_unused_categories()
-    basics_df["startYear"] = pd.to_numeric(basics_df["startYear"], errors="coerce").astype(  # type: ignore[union-attr]
-        "Int32"
-    )
+            # Transform
+            title_type = TitleType[row[1]].value
+            original_title = None if row[3] == "\\N" else row[3]
+            try:
+                year = int(row[4]) if row[4] != "\\N" else None
+            except (ValueError, TypeError):
+                year = None
 
-    basics_df["title_lower"] = basics_df["primaryTitle"].apply(normalize_title)
-    basics_df["original_title_lower"] = basics_df["originalTitle"].apply(normalize_title)
-    basics_df["title_type_int"] = basics_df["titleType"].map(lambda x: TitleType[x]).astype("Int32")
+            titles.append(
+                (
+                    row[0],  # tconst
+                    title_type,
+                    row[2],  # primaryTitle
+                    normalize_title(row[2]),
+                    original_title,
+                    normalize_title(original_title) if original_title else None,
+                    year,
+                )
+            )
+    titles_read_time = time.time() - titles_start
+    print(f" ✓ {titles_read_time:.2f}s ({len(titles):,} titles)")
 
-    movies_df = basics_df[
-        [
-            "tconst",
-            "title_type_int",
-            "primaryTitle",
-            "title_lower",
-            "originalTitle",
-            "original_title_lower",
-            "startYear",
-        ]
-    ].rename(
-        columns={
-            "title_type_int": "title_type",
-            "primaryTitle": "title",
-            "originalTitle": "original_title",
-            "startYear": "year",
-        }
-    )
-    print(" ✓")
-
-    print("  Inserting titles...", end="", flush=True)
-    movies_df.to_sql("titles", conn, if_exists="replace", index=False)
+    # Bulk insert
+    print("  [2/2] Inserting and indexing...", end="", flush=True)
+    titles_insert_start = time.time()
+    cursor.executemany("INSERT INTO titles VALUES (?,?,?,?,?,?,?)", titles)
+    conn.commit()
     cursor.execute("CREATE UNIQUE INDEX idx_titles_pk ON titles(tconst)")
-    print(f" ✓ {green(f'({len(movies_df):,} titles)')}")
+    titles_insert_time = time.time() - titles_insert_start
+    titles_total = time.time() - titles_start
+    print(f" ✓ {titles_insert_time:.2f}s (total: {titles_total:.2f}s)")
 
     # Load and process directors
-    print("→ Loading directors...", end="", flush=True)
-    crew_df = pd.read_csv(
-        data_dir / "crew.tsv",
-        sep="\t",
-        na_values="\\N",
-        usecols=["tconst", "directors"],  # type: ignore[call-overload]
-        dtype={"tconst": "string", "directors": "string"},
-    )
-    crew_df = crew_df[crew_df["directors"].notna()].copy()
-    crew_df["directors"] = crew_df["directors"].str.split(",")
-    directors_df = crew_df.explode("directors").reset_index(drop=True)
-    directors_df = directors_df.rename(columns={"directors": "director_id", "tconst": "title_id"})
-    directors_df = directors_df[["director_id", "title_id"]].drop_duplicates()
-    print(" ✓")
+    print("→ Loading directors...")
+    directors_start = time.time()
+    print("  [1/2] Reading and filtering...", end="", flush=True)
+    directors = []
+    for chunk in read_imdb_tsv(data_dir / "crew.tsv", cols=("tconst", "directors")):
+        for row in chunk:
+            # indices: 0=tconst, 1=directors
+            if not row[1] or row[1] == "\\N":
+                continue
+            directors.extend((director_id, row[0]) for director_id in row[1].split(","))
+    directors_read_time = time.time() - directors_start
+    print(f" ✓ {directors_read_time:.2f}s ({len(directors):,} relationships)")
 
-    print("  Inserting directors...", end="", flush=True)
-    directors_df.to_sql("directors", conn, if_exists="replace", index=False)
-    print(f" ✓ {green(f'({len(directors_df):,} relationships)')}")
+    print("  [2/2] Inserting...", end="", flush=True)
+    directors_insert_start = time.time()
+    cursor.execute("CREATE TABLE directors (director_id TEXT, title_id TEXT)")
+    cursor.executemany("INSERT INTO directors VALUES (?,?)", directors)
+    conn.commit()
+    directors_insert_time = time.time() - directors_insert_start
+    directors_total = time.time() - directors_start
+    print(f" ✓ {directors_insert_time:.2f}s (total: {directors_total:.2f}s)")
 
-    # Load and process actors (chunked due to size)
-    print("\n→ Loading actors (large file, this may take a minute)...")
-    chunk_size = 500_000
-    actors_chunks = []
+    overall_start = time.time()
+
+    print("→ Loading actors...")
+    print("  [1/2] Reading and filtering...", end="", flush=True)
+    actors = []
+    total_rows = 0
+    read_start = time.time()
 
     for chunk_num, chunk in enumerate(
-        pd.read_csv(
-            data_dir / "principals.tsv",
-            sep="\t",
-            na_values="\\N",
-            usecols=["tconst", "nconst", "category"],  # type: ignore[call-overload]
-            dtype={"tconst": "string", "nconst": "string", "category": "category"},
-            chunksize=chunk_size,
+        read_imdb_tsv(
+            data_dir / "principals.tsv", cols=("tconst", "nconst", "category"), chunksize=500_000
         ),
         start=1,
     ):
-        # Print progress every 25 chunks for better feedback
-        if chunk_num % 25 == 0:
-            rows_processed = chunk_num * chunk_size
+        total_rows += len(chunk)
+
+        # Filter to actors/actresses and collect (indices: 0=tconst, 1=nconst, 2=category)
+        actors.extend((row[1], row[0]) for row in chunk if row[2] in ("actor", "actress"))
+
+        # Progress reporting every 10 chunks
+        if chunk_num % 10 == 0:
+            elapsed = time.time() - read_start
+            rate = total_rows / elapsed if elapsed > 0 else 0
             print(
-                f"  {dim(f'Processing actors... ({rows_processed:,} rows)')}", end="\r", flush=True
+                f"\r  [1/2] Reading and filtering... chunk {chunk_num} ({rate:,.0f} rows/s)",
+                end="",
+                flush=True,
             )
 
-        # Filter to actors/actresses only
-        filtered = chunk[chunk["category"].isin(["actor", "actress"])].copy()
-        filtered = filtered[["nconst", "tconst"]].rename(
-            columns={"nconst": "actor_id", "tconst": "title_id"}
-        )
-        actors_chunks.append(filtered)
-
-    print("  Combining and deduplicating...", end="", flush=True)
-    actors_df = pd.concat(actors_chunks, ignore_index=True).drop_duplicates()
-    print(" ✓")
-
-    print("  Inserting actors...", end="", flush=True)
-    actors_df.to_sql("actors", conn, if_exists="replace", index=False)
-    print(f" ✓ {green(f'({len(actors_df):,} relationships)')}")
-
-    # Load and process names
-    print("→ Loading names...", end="", flush=True)
-    names_df = pd.read_csv(
-        data_dir / "names.tsv",
-        sep="\t",
-        na_values="\\N",
-        usecols=["nconst", "primaryName"],  # type: ignore[call-overload]
-        dtype={"nconst": "string", "primaryName": "string"},
+    read_time = time.time() - read_start
+    print(
+        f"\r  [1/2] Reading and filtering... ✓ {read_time:.2f}s ({len(actors):,} actors)" + " " * 30
     )
-    names_df = names_df[names_df["primaryName"].notna()].copy()
-    names_df = names_df.rename(columns={"nconst": "name_id", "primaryName": "name"})
-    print(" ✓")
 
-    print("  Inserting names...", end="", flush=True)
-    names_df.to_sql("names", conn, if_exists="replace", index=False)
+    # Bulk insert (skip deduplication - duplicates are very rare and handled by queries)
+    print("  [2/2] Inserting...", end="", flush=True)
+    cursor.execute("CREATE TABLE actors (actor_id TEXT, title_id TEXT)")
+    insert_start = time.time()
+    cursor.executemany("INSERT INTO actors VALUES (?,?)", actors)
+    conn.commit()
+    insert_time = time.time() - insert_start
+
+    total_time = time.time() - overall_start
+    print(f" ✓ {insert_time:.2f}s (total: {total_time:.2f}s)")
+
+    names_overall_start = time.time()
+
+    print("→ Loading names...")
+    print("  [1/2] Reading and filtering...", end="", flush=True)
+    names = []
+    names_read_start = time.time()
+    for chunk in read_imdb_tsv(data_dir / "names.tsv", cols=("nconst", "primaryName")):
+        for row in chunk:
+            # indices: 0=nconst, 1=primaryName
+            if not row[1] or row[1] == "\\N":
+                continue
+            names.append((row[0], row[1]))
+
+    names_read_time = time.time() - names_read_start
+    print(f" ✓ {names_read_time:.2f}s ({len(names):,} names)")
+
+    print("  [2/2] Creating table and inserting...", end="", flush=True)
+    names_insert_start = time.time()
+    cursor.execute("CREATE TABLE names (name_id TEXT PRIMARY KEY, name TEXT)")
+    cursor.executemany("INSERT INTO names VALUES (?,?)", names)
+    conn.commit()
     cursor.execute("CREATE UNIQUE INDEX idx_names_pk ON names(name_id)")
-    print(f" ✓ {green(f'({len(names_df):,} names)')}")
+    names_insert_time = time.time() - names_insert_start
+
+    names_total_time = time.time() - names_overall_start
+    print(f" ✓ {names_insert_time:.2f}s (total: {names_total_time:.2f}s)")
 
     # Create indexes
     indexes = [
@@ -500,27 +543,24 @@ def convert_to_sqlite(db_path: Path) -> None:
         ("idx_actors_title", "actors(title_id)"),
     ]
 
-    print("\n→ Creating indexes (2-3 minutes)...", end="", flush=True)
-    for i, (idx_name, idx_def) in enumerate(indexes, 1):
-        print(f"  {dim(f'Creating index {i}/{len(indexes)}...')}", end="\r", flush=True)
+    print("\n→ Creating indexes...", end="", flush=True)
+    indexes_start = time.time()
+    for idx_name, idx_def in indexes:
         cursor.execute(f"CREATE INDEX {idx_name} ON {idx_def}")
-    # Clear the progress line and show completion
-    print(f"{'→ Creating indexes (2-3 minutes)...'}{' ' * 20} ✓")
+    indexes_time = time.time() - indexes_start
+    print(f" ✓ {indexes_time:.2f}s ({len(indexes)} indexes)")
 
-    # Gather statistics for query optimizer
-    print("  Gathering statistics...", end="", flush=True)
+    print("  Analyzing database...", end="", flush=True)
+    analyze_start = time.time()
     cursor.execute("ANALYZE")
-    print(" ✓")
+    analyze_time = time.time() - analyze_start
+    print(f" ✓ {analyze_time:.2f}s")
 
     conn.commit()
     conn.close()
 
-    print(f"\n{bold(green(f'✓ SQLite database ({db_path}) created successfully!'))}\n")
-
-
-def get_db_connection(db_path: Path) -> sqlite3.Connection:
-    """Get SQLite database connection"""
-    return sqlite3.connect(db_path)
+    total_time = time.time() - overall_start
+    print(f"\n{bold(green(f'✓ Database ready in {total_time:.2f}s'))}\n")
 
 
 def _try_exact_match(
@@ -912,11 +952,11 @@ def analyze_sets(
 
     print(f"\n{bold(magenta('🎬 Letterboxd Set Analyzer'))}\n")
 
-    watched_df = pd.read_csv(watched_file)
-    watchlist_df = pd.read_csv(watchlist_file) if watchlist_file else None
+    watched_rows = list(csv.DictReader(watched_file))
+    watchlist_rows = list(csv.DictReader(watchlist_file)) if watchlist_file else None
 
     # Connect to SQLite database to get dataset date
-    conn = get_db_connection(db_path)
+    conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
 
     # Get IMDb dataset date from database file modification time
@@ -951,9 +991,12 @@ def analyze_sets(
     watchlist_films: set[Film] = set()
     unmatched: list[str] = []
 
-    for _idx, row in watched_df.iterrows():
+    for row in watched_rows:
         title = str(row["Name"])
-        year = int(row["Year"]) if pd.notna(row["Year"]) else None  # type: ignore[arg-type]
+        try:
+            year = int(row["Year"])
+        except (ValueError, KeyError):
+            year = None
 
         if match := match_movie_sqlite(conn, title, year, filters):
             watched_tconsts.add(match.tconst)
@@ -963,10 +1006,10 @@ def analyze_sets(
 
     # Print match results
     watchlist_msg = (
-        f" and {bold(str(len(watchlist_df)))} watchlisted" if watchlist_df is not None else ""
+        f" and {bold(str(len(watchlist_rows)))} watchlisted" if watchlist_rows is not None else ""
     )
     print(
-        f"{magenta('↳')} matched {bold(f'{len(watched_tconsts)}/{len(watched_df)}')} watched{watchlist_msg} titles\n"
+        f"{magenta('↳')} matched {bold(f'{len(watched_tconsts)}/{len(watched_rows)}')} watched{watchlist_msg} titles\n"
     )
 
     if unmatched and debug:
@@ -976,10 +1019,13 @@ def analyze_sets(
         print()
 
     # Match watchlist films to IMDb if provided
-    if watchlist_df is not None:
-        for _idx, row in watchlist_df.iterrows():
+    if watchlist_rows:
+        for row in watchlist_rows:
             title = str(row["Name"])
-            year = int(row["Year"]) if pd.notna(row["Year"]) else None  # type: ignore[arg-type]
+            try:
+                year = int(row["Year"])
+            except (ValueError, KeyError):
+                year = None
             if match := match_movie_sqlite(conn, title, year, filters):
                 watchlist_films.add(Film(match.title, match.year))
 
@@ -1267,7 +1313,6 @@ Examples:
     if args.rebuild or (has_all_data and not db_path.exists()):
         convert_to_sqlite(db_path)
         if args.rebuild:
-            print(f"{bold(green('✓ Setup complete!'))} You can now analyze your watch history.\n")
             sys.exit(0)
 
     if not db_path.exists():

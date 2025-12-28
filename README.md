@@ -17,7 +17,7 @@ Perfect for cinephiles who want to explore filmographies systematically or disco
 
 **Installation options:**
 
-**Option 1: Using `uv` (recommended)** - automatically handles dependencies
+**Option 1: Using `uv` (recommended)**
 
 ```bash
 # Install uv if you don't have it: https://docs.astral.sh/uv/
@@ -28,14 +28,11 @@ cd setterboxd
 uv run setterboxd.py --rebuild
 ```
 
-**Option 2: Using Python directly** - requires manual dependency installation
+**Option 2: Using Python directly**
 
 ```bash
 # Clone or download this repository
 cd setterboxd
-
-# Install dependencies
-pip install pandas
 
 # Download IMDb data and build database (~1GB download, takes 2-5 minutes)
 python setterboxd.py --rebuild
