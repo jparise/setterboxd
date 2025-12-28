@@ -578,7 +578,6 @@ def _try_exact_match(
           AND year BETWEEN ? AND ?
           AND title_type IN ({sql_placeholders(filters.title_types)})
         ORDER BY ABS(year - ?) ASC
-        LIMIT 1
     """,
         (
             title_lower,
@@ -589,10 +588,29 @@ def _try_exact_match(
             year,
         ),
     )
-    if result := cursor.fetchone():
+    results = cursor.fetchall()
+    if not results:
+        return None
+
+    # Multiple results with same year - use cast count as tiebreaker
+    if len(results) > 1 and len({r[2] for r in results}) == 1:
+        cursor.execute(
+            f"""
+            SELECT t.tconst, t.title, t.year, COUNT(a.actor_id) as cast_count
+            FROM titles t
+            LEFT JOIN actors a ON t.tconst = a.title_id
+            WHERE t.tconst IN ({sql_placeholders(results)})
+            GROUP BY t.tconst, t.title, t.year
+            ORDER BY cast_count DESC
+            LIMIT 1
+        """,
+            [r[0] for r in results],
+        )
+        result = cursor.fetchone()
         return ImdbMatch(result[0], result[1], result[2])
 
-    return None
+    # Single result or different years - return first (closest year match)
+    return ImdbMatch(*results[0])
 
 
 def match_movie_sqlite(
