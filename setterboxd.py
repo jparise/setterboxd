@@ -1067,14 +1067,11 @@ def analyze_sets(
     all_results.sort(key=lambda x: x["completion"], reverse=True)
 
     if debug:
-        print(
-            f"\n{
-                dim(
-                    f'Debug: Total results: {len(all_results)} '
-                    f'({len(director_results)} directors, {len(actor_results)} actors)'
-                )
-            }"
+        summary = (
+            f"Debug: Total results: {len(all_results)} "
+            f"({len(director_results)} directors, {len(actor_results)} actors)"
         )
+        print(f"\n{dim(summary)}")
         if director_results:
             director_completions = [r["completion"] * 100 for r in director_results]
             print(
