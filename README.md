@@ -3,7 +3,7 @@
 Discover completed and near-complete "sets" of movies in your Letterboxd watchlist. Find directors and actors where you've seen most of their work, and get recommendations for the films you're missing.
 
 > [!NOTE]
-> This project is also a personal exploration into AI-assisted development (primarily using Claude Code), which a focus on iterative improvements coupled with manually review.
+> This project is also a personal exploration into AI-assisted development (primarily using Claude Code), with a focus on iterative improvements coupled with manual review.
 
 ## What it does
 
@@ -16,30 +16,17 @@ Perfect for cinephiles who want to explore filmographies systematically or disco
 
 ## Quick Start
 
-**Prerequisites:** Python 3.11+
+**Prerequisites:** Python 3.11+, or [uv](https://docs.astral.sh/uv/).
 
-**Installation options:**
-
-**Option 1: Using `uv` (recommended)**
+Clone this repository, then download the IMDb data and build the database
+(~1GB download, takes 2-5 minutes):
 
 ```bash
-# Install uv if you don't have it: https://docs.astral.sh/uv/
-# Clone or download this repository
-cd setterboxd
-
-# Download IMDb data and build database (~1GB download, takes 2-5 minutes)
 uv run setterboxd.py --rebuild
 ```
 
-**Option 2: Using Python directly**
-
-```bash
-# Clone or download this repository
-cd setterboxd
-
-# Download IMDb data and build database (~1GB download, takes 2-5 minutes)
-python setterboxd.py --rebuild
-```
+Every command below works with either `uv run setterboxd.py` or
+`python setterboxd.py`.
 
 **Export your Letterboxd data:**
 
@@ -50,18 +37,12 @@ python setterboxd.py --rebuild
 **Run the analysis:**
 
 ```bash
-# With uv:
 uv run setterboxd.py watched.csv
-
-# Or with Python:
-python setterboxd.py watched.csv
 ```
 
 This shows directors and actors where you've seen at least 50% of their films (minimum 5 films each).
 
 ## Examples
-
-All examples work with either `uv run setterboxd.py` or `python setterboxd.py`.
 
 **Find directors you've almost completed:**
 
@@ -129,9 +110,9 @@ uv run setterboxd.py watched.csv --debug
 
 ## How it works
 
-Setterboxd uses IMDb's public datasets to match your watched films and build complete filmographies. The first run downloads ~1GB of data and converts it to a local SQLite database. Subsequent analyses are fast (5-15 seconds for 500+ films).
+Setterboxd uses IMDb's public datasets to match your watched films and build complete filmographies. The first run downloads ~1GB of data and converts it to a local SQLite database; subsequent analyses run against that database and take seconds.
 
-The matching algorithm handles title variations, year discrepancies, and international titles to maximize match accuracy (typically 95%+).
+The matching algorithm handles title variations, year discrepancies, and international titles. Run with `--debug` to see which of your titles went unmatched.
 
 ## Data & Privacy
 
