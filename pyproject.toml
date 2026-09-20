@@ -7,15 +7,11 @@ requires-python = ">=3.11"
 [dependency-groups]
 dev = [
     "pyright",
-    "ruff",
+    "ruff>=0.14.1,<0.15",
 ]
 
 [tool.ruff]
-# Set line length to 100 for long f-strings with Rich formatting
 line-length = 100
-
-# Target Python 3.11+ for performance improvements (~25% faster)
-target-version = "py311"
 
 [tool.ruff.lint]
 # Enable recommended rules
@@ -47,6 +43,7 @@ ignore = [
     "PLR0915", # Too many statements (database conversion is inherently long)
     "PLR0912", # Too many branches (analyze_sets has many display paths)
     "PLR0913", # Too many arguments (analyze_sets needs many config options)
+    "PLR0917", # Too many positional arguments (same rationale as PLR0913)
     "PLR2004", # Magic values (many are self-documenting like year tolerances, min lengths)
     "RUF001",  # Ambiguous unicode (intentional for normalization examples)
     "RUF002",  # Ambiguous unicode in docstrings
