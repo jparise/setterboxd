@@ -37,4 +37,4 @@ jobs:
           ruff format --diff
       - name: Typing
         run: |
-          pyright
+          ty check

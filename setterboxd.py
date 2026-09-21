@@ -968,12 +968,11 @@ def analyze_sets(
 
     if debug:
         print(
-            f"\n{
-                dim(
-                    f'Debug: Total results: {len(all_results)} '
-                    f'({len(director_results)} directors, {len(actor_results)} actors)'
-                )
-            }"
+            "\n"
+            + dim(
+                f"Debug: Total results: {len(all_results)} "
+                f"({len(director_results)} directors, {len(actor_results)} actors)"
+            )
         )
         for label, results in (("Director", director_results), ("Actor", actor_results)):
             if results:

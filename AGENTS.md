@@ -8,7 +8,7 @@ Always run after changes:
 ```bash
 ruff format setterboxd.py  # Format first
 ruff check --fix setterboxd.py
-pyright setterboxd.py
+ty check setterboxd.py
 ```
 
 ## Notes
