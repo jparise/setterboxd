@@ -24,8 +24,8 @@ import sys
 import time
 import traceback
 import urllib.request
-from collections import defaultdict
-from collections.abc import Sized
+from collections import Counter, defaultdict
+from collections.abc import Iterator, Sized
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -73,24 +73,14 @@ def linkify(url: str, text: str) -> str:
     return f"\033]8;;{url}\033\\{text}\033]8;;\033\\"
 
 
-def read_imdb_tsv(filepath: Path, cols: tuple[str, ...], chunksize: int = 100_000):
-    """Read IMDb TSV file, yielding chunks as lists of tuples."""
+def read_imdb_tsv(filepath: Path, cols: tuple[str, ...]) -> Iterator[tuple[str, ...]]:
+    """Read an IMDb TSV file, yielding the requested columns of each row."""
     with open(filepath, encoding="utf-8") as f:
-        header = f.readline().rstrip("\n").split("\t")
+        reader = csv.reader(f, delimiter="\t", quoting=csv.QUOTE_NONE)
+        header = next(reader)
         indices = [header.index(col) for col in cols]
-
-        chunk = []
-        for line in f:
-            fields = line.rstrip("\n").split("\t")
-            row = tuple(fields[i] for i in indices)
-            chunk.append(row)
-
-            if len(chunk) >= chunksize:
-                yield chunk
-                chunk = []
-
-        if chunk:
-            yield chunk
+        for fields in reader:
+            yield tuple(fields[i] for i in indices)
 
 
 def confirm(prompt: str, default: bool = True) -> bool:
@@ -114,35 +104,27 @@ def strip_ansi(text: str) -> str:
     return re.sub(r"\033\]8;;[^\033]*\033\\", "", text)
 
 
+def fit_cell(cell: str, width: int) -> str:
+    """Pad or truncate a cell to width, ignoring ANSI codes when measuring.
+
+    Truncation drops styling, since a cut would leave escape sequences unterminated.
+    """
+    visual_len = len(strip_ansi(cell))
+    if visual_len > width:
+        return strip_ansi(cell)[: width - 1] + "…"
+    return cell + " " * (width - visual_len)
+
+
 def print_table(headers: list[str], rows: list[list[str]], col_widths: list[int]) -> None:
     """Print a simple table with aligned columns"""
-    # Header row
-    header_parts = []
-    for header, width in zip(headers, col_widths, strict=True):
-        visual_len = len(strip_ansi(header))
-        padding = width - visual_len
-        header_parts.append(header + " " * padding)
-    print("  ".join(header_parts))
 
-    # Separator
-    total_width = sum(col_widths) + (len(col_widths) - 1) * 2  # 2 spaces between columns
-    print(dim("─" * total_width))
+    def format_row(row: list[str]) -> str:
+        return "  ".join(fit_cell(c, w) for c, w in zip(row, col_widths, strict=True))
 
-    # Data rows
+    print(format_row(headers))
+    print(dim("─" * (sum(col_widths) + (len(col_widths) - 1) * 2)))
     for row in rows:
-        row_parts = []
-        for cell, width in zip(row, col_widths, strict=True):
-            visual_len = len(strip_ansi(cell))
-            if visual_len > width:
-                # Truncate - we lose ANSI styling but keep it readable
-                plain = strip_ansi(cell)
-                truncated = plain[: width - 1] + "…"
-                row_parts.append(truncated)
-            else:
-                # Pad
-                padding = width - visual_len
-                row_parts.append(cell + " " * padding)
-        print("  ".join(row_parts))
+        print(format_row(row))
 
 
 @enum.unique
@@ -153,7 +135,7 @@ class TitleType(enum.IntEnum):
     tvMovie = 4  # noqa: N815
 
 
-TitleType.default = frozenset({TitleType.movie})  # type: ignore[attr-defined]
+DEFAULT_TITLE_TYPES = frozenset({TitleType.movie})
 
 
 @enum.unique
@@ -225,34 +207,19 @@ class Range(NamedTuple):
 
         Single values (e.g., '80') default to max_bound as the upper limit.
         """
+        low, sep, high = value.partition("-")
         try:
-            if "-" in value:
-                parts = value.split("-")
-                if len(parts) != 2:
-                    raise argparse.ArgumentTypeError(
-                        f"Invalid range format '{value}'. Use 'N' or 'MIN-MAX'"
-                    )
-                min_val = int(parts[0])
-                max_val = int(parts[1])
-            else:
-                min_val = int(value)
-                max_val = max_bound
-
-            # Validation
-            if not (min_bound <= min_val <= max_bound):
-                raise argparse.ArgumentTypeError(
-                    f"Min value {min_val} out of bounds [{min_bound}, {max_bound}]"
-                )
-            if not (min_bound <= max_val <= max_bound):
-                raise argparse.ArgumentTypeError(
-                    f"Max value {max_val} out of bounds [{min_bound}, {max_bound}]"
-                )
-            if min_val > max_val:
-                raise argparse.ArgumentTypeError(f"Min {min_val} cannot exceed max {max_val}")
-
-            return cls(min_val, max_val)
+            min_val = int(low)
+            max_val = int(high) if sep else max_bound
         except ValueError as e:
             raise argparse.ArgumentTypeError(f"Invalid number in range '{value}'") from e
+
+        if not (min_bound <= min_val <= max_val <= max_bound):
+            raise argparse.ArgumentTypeError(
+                f"Range '{value}' must be within [{min_bound}, {max_bound}] with min <= max"
+            )
+
+        return cls(min_val, max_val)
 
 
 @dataclass(frozen=True)
@@ -270,7 +237,7 @@ class Filters:
     # Set of title types to consider. Allows filtering by content type such as
     # theatrical movies only, or including TV movies and miniseries.
     # Defaults to movie only.
-    title_types: frozenset[TitleType] = TitleType.default  # type: ignore[attr-defined]
+    title_types: frozenset[TitleType] = DEFAULT_TITLE_TYPES
 
     def to_sql(self) -> tuple[str, list]:
         """Returns (WHERE clause fragment, params) for filtering."""
@@ -338,9 +305,8 @@ def download_imdb_data(data_dir: Path, replace: bool = False) -> None:
             print(" ✓")
 
             print(f"  Extracting {name}...", end="", flush=True)
-            with gzip.open(gz_file, "rb") as f_in:
-                with open(tsv_file, "wb") as f_out:
-                    shutil.copyfileobj(f_in, f_out)
+            with gzip.open(gz_file, "rb") as f_in, open(tsv_file, "wb") as f_out:
+                shutil.copyfileobj(f_in, f_out)
 
             gz_file.unlink()
             file_size_mb = tsv_file.stat().st_size / (1024 * 1024)
@@ -357,7 +323,7 @@ def convert_to_sqlite(db_path: Path) -> None:
 
     print(f"\n{bold(cyan('Converting IMDb data to SQLite database'))}")
 
-    overall_start = time.time()
+    start = time.time()
 
     if db_path.exists():
         db_path.unlink()
@@ -372,169 +338,91 @@ def convert_to_sqlite(db_path: Path) -> None:
     cursor.execute("PRAGMA temp_store = MEMORY")  # Keep temp tables in memory
     cursor.execute("PRAGMA locking_mode = EXCLUSIVE")  # No other processes during build
 
-    # Load and process titles (basics)
-    print("→ Loading titles...")
-    titles_start = time.time()
-    print("  [1/2] Reading and filtering...", end="", flush=True)
+    print("→ Loading titles...", end="", flush=True)
     cursor.execute("""
         CREATE TABLE titles (
             tconst TEXT PRIMARY KEY,
             title_type INTEGER,
             title TEXT,
             title_lower TEXT,
-            original_title TEXT,
             original_title_lower TEXT,
             year INTEGER
         )
     """)
 
     titles = []
-    for chunk in read_imdb_tsv(
+    for row in read_imdb_tsv(
         data_dir / "basics.tsv",
         cols=("tconst", "titleType", "primaryTitle", "originalTitle", "startYear"),
     ):
-        for row in chunk:
-            # Filter (indices: 0=tconst, 1=titleType, 2=primaryTitle, 3=originalTitle, 4=startYear)
-            if row[1] not in TitleType.__members__ or not row[2] or row[2] == "\\N":
-                continue
+        tconst, title_type, primary_title, original_title, start_year = row
+        if title_type not in TitleType.__members__ or not primary_title or primary_title == "\\N":
+            continue
 
-            # Transform
-            title_type = TitleType[row[1]].value
-            original_title = None if row[3] == "\\N" else row[3]
-            try:
-                year = int(row[4]) if row[4] != "\\N" else None
-            except (ValueError, TypeError):
-                year = None
+        try:
+            year = int(start_year) if start_year != "\\N" else None
+        except ValueError:
+            year = None
 
-            titles.append(
-                (
-                    row[0],  # tconst
-                    title_type,
-                    row[2],  # primaryTitle
-                    normalize_title(row[2]),
-                    original_title,
-                    normalize_title(original_title) if original_title else None,
-                    year,
-                )
+        titles.append(
+            (
+                tconst,
+                TitleType[title_type].value,
+                primary_title,
+                normalize_title(primary_title),
+                normalize_title(original_title) if original_title != "\\N" else None,
+                year,
             )
-    titles_read_time = time.time() - titles_start
-    print(f" ✓ {titles_read_time:.2f}s ({len(titles):,} titles)")
+        )
 
-    # Bulk insert
-    print("  [2/2] Inserting and indexing...", end="", flush=True)
-    titles_insert_start = time.time()
-    cursor.executemany("INSERT INTO titles VALUES (?,?,?,?,?,?,?)", titles)
+    cursor.executemany("INSERT INTO titles VALUES (?,?,?,?,?,?)", titles)
     conn.commit()
-    cursor.execute("CREATE UNIQUE INDEX idx_titles_pk ON titles(tconst)")
-    titles_insert_time = time.time() - titles_insert_start
-    titles_total = time.time() - titles_start
-    print(f" ✓ {titles_insert_time:.2f}s (total: {titles_total:.2f}s)")
+    print(f" ✓ {len(titles):,} titles")
 
-    # Load and process directors
-    print("→ Loading directors...")
-    directors_start = time.time()
-    print("  [1/2] Reading and filtering...", end="", flush=True)
+    print("→ Loading directors...", end="", flush=True)
     directors = []
-    for chunk in read_imdb_tsv(data_dir / "crew.tsv", cols=("tconst", "directors")):
-        for row in chunk:
-            # indices: 0=tconst, 1=directors
-            if not row[1] or row[1] == "\\N":
-                continue
-            directors.extend((director_id, row[0]) for director_id in row[1].split(","))
-    directors_read_time = time.time() - directors_start
-    print(f" ✓ {directors_read_time:.2f}s ({len(directors):,} relationships)")
+    for tconst, director_ids in read_imdb_tsv(data_dir / "crew.tsv", cols=("tconst", "directors")):
+        if not director_ids or director_ids == "\\N":
+            continue
+        directors.extend((director_id, tconst) for director_id in director_ids.split(","))
 
-    print("  [2/2] Inserting...", end="", flush=True)
-    directors_insert_start = time.time()
     cursor.execute("CREATE TABLE directors (director_id TEXT, title_id TEXT)")
     cursor.executemany("INSERT INTO directors VALUES (?,?)", directors)
     conn.commit()
-    directors_insert_time = time.time() - directors_insert_start
-    directors_total = time.time() - directors_start
-    print(f" ✓ {directors_insert_time:.2f}s (total: {directors_total:.2f}s)")
+    print(f" ✓ {len(directors):,} relationships")
 
-    overall_start = time.time()
+    print("→ Loading actors...", end="", flush=True)
+    # Duplicates are rare and handled by queries, so skip deduplication.
+    actors = [
+        (nconst, tconst)
+        for tconst, nconst, category in read_imdb_tsv(
+            data_dir / "principals.tsv", cols=("tconst", "nconst", "category")
+        )
+        if category in ("actor", "actress")
+    ]
 
-    print("→ Loading actors...")
-    print("  [1/2] Reading and filtering...", end="", flush=True)
-    actors = []
-    total_rows = 0
-    read_start = time.time()
-
-    for chunk_num, chunk in enumerate(
-        read_imdb_tsv(
-            data_dir / "principals.tsv", cols=("tconst", "nconst", "category"), chunksize=500_000
-        ),
-        start=1,
-    ):
-        total_rows += len(chunk)
-
-        # Filter to actors/actresses and collect (indices: 0=tconst, 1=nconst, 2=category)
-        actors.extend((row[1], row[0]) for row in chunk if row[2] in ("actor", "actress"))
-
-        # Progress reporting every 10 chunks
-        if chunk_num % 10 == 0:
-            elapsed = time.time() - read_start
-            rate = total_rows / elapsed if elapsed > 0 else 0
-            print(
-                f"\r  [1/2] Reading and filtering... chunk {chunk_num} ({rate:,.0f} rows/s)",
-                end="",
-                flush=True,
-            )
-
-    read_time = time.time() - read_start
-    print(
-        f"\r  [1/2] Reading and filtering... ✓ {read_time:.2f}s ({len(actors):,} actors)" + " " * 30
-    )
-
-    # Bulk insert (skip deduplication - duplicates are very rare and handled by queries)
-    print("  [2/2] Inserting...", end="", flush=True)
     cursor.execute("CREATE TABLE actors (actor_id TEXT, title_id TEXT)")
-    insert_start = time.time()
     cursor.executemany("INSERT INTO actors VALUES (?,?)", actors)
     conn.commit()
-    insert_time = time.time() - insert_start
+    print(f" ✓ {len(actors):,} relationships")
 
-    total_time = time.time() - overall_start
-    print(f" ✓ {insert_time:.2f}s (total: {total_time:.2f}s)")
+    print("→ Loading names...", end="", flush=True)
+    names = [
+        (nconst, name)
+        for nconst, name in read_imdb_tsv(data_dir / "names.tsv", cols=("nconst", "primaryName"))
+        if name and name != "\\N"
+    ]
 
-    names_overall_start = time.time()
-
-    print("→ Loading names...")
-    print("  [1/2] Reading and filtering...", end="", flush=True)
-    names = []
-    names_read_start = time.time()
-    for chunk in read_imdb_tsv(data_dir / "names.tsv", cols=("nconst", "primaryName")):
-        for row in chunk:
-            # indices: 0=nconst, 1=primaryName
-            if not row[1] or row[1] == "\\N":
-                continue
-            names.append((row[0], row[1]))
-
-    names_read_time = time.time() - names_read_start
-    print(f" ✓ {names_read_time:.2f}s ({len(names):,} names)")
-
-    print("  [2/2] Creating table and inserting...", end="", flush=True)
-    names_insert_start = time.time()
     cursor.execute("CREATE TABLE names (name_id TEXT PRIMARY KEY, name TEXT)")
     cursor.executemany("INSERT INTO names VALUES (?,?)", names)
     conn.commit()
-    cursor.execute("CREATE UNIQUE INDEX idx_names_pk ON names(name_id)")
-    names_insert_time = time.time() - names_insert_start
+    print(f" ✓ {len(names):,} names")
 
-    names_total_time = time.time() - names_overall_start
-    print(f" ✓ {names_insert_time:.2f}s (total: {names_total_time:.2f}s)")
-
-    # Create indexes
     indexes = [
-        # Composite indexes for the most common query patterns
+        # Composite indexes for the most common query patterns. Each also serves
+        # lookups on its leading column alone.
         ("idx_titles_title_year", "titles(title_lower, year)"),
         ("idx_titles_original_title_year", "titles(original_title_lower, year)"),
-        # Single-column indexes for other query patterns
-        ("idx_titles_title_lower", "titles(title_lower)"),
-        ("idx_titles_original_title_lower", "titles(original_title_lower)"),
-        ("idx_titles_year", "titles(year)"),
-        # Composite index for filmography queries (type + year filtering)
         ("idx_titles_type_year", "titles(title_type, year)"),
         # Junction table indexes
         ("idx_directors_title", "directors(title_id)"),
@@ -543,24 +431,16 @@ def convert_to_sqlite(db_path: Path) -> None:
         ("idx_actors_title", "actors(title_id)"),
     ]
 
-    print("\n→ Creating indexes...", end="", flush=True)
-    indexes_start = time.time()
+    print("→ Creating indexes...", end="", flush=True)
     for idx_name, idx_def in indexes:
         cursor.execute(f"CREATE INDEX {idx_name} ON {idx_def}")
-    indexes_time = time.time() - indexes_start
-    print(f" ✓ {indexes_time:.2f}s ({len(indexes)} indexes)")
-
-    print("  Analyzing database...", end="", flush=True)
-    analyze_start = time.time()
     cursor.execute("ANALYZE")
-    analyze_time = time.time() - analyze_start
-    print(f" ✓ {analyze_time:.2f}s")
+    print(f" ✓ {len(indexes)} indexes")
 
     conn.commit()
     conn.close()
 
-    total_time = time.time() - overall_start
-    print(f"\n{bold(green(f'✓ Database ready in {total_time:.2f}s'))}\n")
+    print(f"\n{bold(green(f'✓ Database ready in {time.time() - start:.2f}s'))}\n")
 
 
 def _try_exact_match(
@@ -721,21 +601,16 @@ def fetch_min_years_from_db(cursor: sqlite3.Cursor, titles: set[str]) -> dict[st
     return dict(cursor.fetchall())
 
 
-def should_include_year_in_url(title: str, year: int, min_year_for_title: int) -> bool:
-    """Determine if year should be included in Letterboxd URL for disambiguation.
-
-    Letterboxd only adds the year to URLs when there are multiple films with the
-    same title, and only for films that are NOT the earliest chronologically.
-    """
-    return year > min_year_for_title
-
-
 def film_to_letterboxd_url(
     title: str, year: int | None = None, min_year_for_title: int | None = None
 ) -> str:
-    """Convert a film title to a Letterboxd URL with clickable link markup"""
+    """Convert a film title to a Letterboxd URL with clickable link markup.
+
+    Letterboxd only appends the year when several films share a title, and only
+    for those that are not the earliest chronologically.
+    """
     slug = slugify(title)
-    if year and min_year_for_title and should_include_year_in_url(title, year, min_year_for_title):
+    if year and min_year_for_title and year > min_year_for_title:
         slug = f"{slug}-{year}"
     url = f"https://letterboxd.com/film/{slug}/"
     return linkify(url, title)
@@ -800,35 +675,25 @@ def format_title_list(
 def collect_people_from_watched_movies(
     cursor: sqlite3.Cursor,
     watched_tconsts: set[str],
-    table_name: Literal["directors", "actors"],
-    person_type: Literal["director", "actor"],
+    person_type: PersonType,
     min_watched: int,
     filters: Filters,
 ) -> dict[str, Person]:
-    """
-    Collect directors or actors from watched titles with progress tracking.
+    """Collect the directors or actors credited on the watched titles.
 
-    Args:
-        cursor: Database cursor
-        watched_tconsts: Set of watched title IDs
-        table_name: "directors" or "actors"
-        person_type: "director" or "actor" (for display)
-        min_watched: Minimum watched titles to include person
-        filters: Filtering parameters (year range, title types)
-
-    Returns:
-        Dictionary mapping person_id to {name, watched} data
+    Returns a dict mapping person_id to {name, watched}, keeping only people
+    with at least min_watched watched titles.
     """
     tconsts = list(watched_tconsts)
-    id_column = f"{person_type}_id"
+    id_column = f"{person_type.value}_id"
     where_clause, filter_params = filters.to_sql()
 
     # Fetch people from watched titles
-    print(f"Collecting {person_type}s from watched titles...", end="", flush=True)
+    print(f"Collecting {person_type.value}s from watched titles...", end="", flush=True)
     cursor.execute(
         f"""
         SELECT t.{id_column}, n.name, m.title, m.year
-        FROM {table_name} t
+        FROM {person_type.table_name} t
         JOIN names n ON t.{id_column} = n.name_id
         JOIN titles m ON t.title_id = m.tconst
         WHERE t.title_id IN ({sql_placeholders(tconsts)})
@@ -845,7 +710,7 @@ def collect_people_from_watched_movies(
         if person_id not in people_by_id:
             people_by_id[person_id] = {"name": person_name, "watched": set()}
         people_by_id[person_id]["watched"].add(Film(movie_title, movie_year))
-    print(f" ✓ {green(f'({len(people_names)} {person_type}s)')}")
+    print(f" ✓ {green(f'({len(people_names)} {person_type.value}s)')}")
 
     # Filter to people worth analyzing
     return {
@@ -858,20 +723,19 @@ def collect_people_from_watched_movies(
 def fetch_filmographies_bulk(
     cursor: sqlite3.Cursor,
     candidates: dict[str, Person],
-    table_name: Literal["directors", "actors"],
-    person_type: Literal["director", "actor"],
+    person_type: PersonType,
     filters: Filters,
     min_watched: int,
 ) -> dict[str, set[Film]]:
     """Fetch filmographies for multiple people in a single bulk query."""
-    print(f"Fetching {person_type} filmographies...", end="", flush=True)
-    id_column = f"{person_type}_id"
+    print(f"Fetching {person_type.value} filmographies...", end="", flush=True)
+    id_column = f"{person_type.value}_id"
     where_clause, filter_params = filters.to_sql()
 
     cursor.execute(
         f"""
         SELECT t.{id_column}, m.title, m.year
-        FROM {table_name} t
+        FROM {person_type.table_name} t
         JOIN titles m ON t.title_id = m.tconst
         WHERE t.{id_column} IN ({sql_placeholders(candidates)})
           AND {where_clause}
@@ -882,7 +746,7 @@ def fetch_filmographies_bulk(
     filmographies = defaultdict(set)
     for person_id, title, year in cursor.fetchall():
         filmographies[person_id].add(Film(title, year))
-    print(f" ✓ {green(f'({len(filmographies)} {person_type}s with {min_watched}+ watched)')}")
+    print(f" ✓ {green(f'({len(filmographies)} {person_type.value}s with {min_watched}+ watched)')}")
 
     return filmographies
 
@@ -940,16 +804,9 @@ def analyze_person_type(
 ) -> list[PersonResult]:
     """Analyze a person type (directors or actors) for completion."""
     candidates = collect_people_from_watched_movies(
-        cursor,
-        watched_tconsts,
-        person_type.table_name,
-        person_type.value,
-        min_watched=min_watched,
-        filters=filters,
+        cursor, watched_tconsts, person_type, min_watched=min_watched, filters=filters
     )
-    filmographies = fetch_filmographies_bulk(
-        cursor, candidates, person_type.table_name, person_type.value, filters, min_watched
-    )
+    filmographies = fetch_filmographies_bulk(cursor, candidates, person_type, filters, min_watched)
     return calculate_completion_results(candidates, filmographies, person_type.value, min_set_size)
 
 
@@ -1067,27 +924,23 @@ def analyze_sets(
     all_results.sort(key=lambda x: x["completion"], reverse=True)
 
     if debug:
-        summary = (
-            f"Debug: Total results: {len(all_results)} "
-            f"({len(director_results)} directors, {len(actor_results)} actors)"
+        print(
+            f"\n{
+                dim(
+                    f'Debug: Total results: {len(all_results)} '
+                    f'({len(director_results)} directors, {len(actor_results)} actors)'
+                )
+            }"
         )
-        print(f"\n{dim(summary)}")
-        if director_results:
-            director_completions = [r["completion"] * 100 for r in director_results]
-            print(
-                dim(
-                    f"Debug: Director completion range: "
-                    f"{min(director_completions):.1f}% - {max(director_completions):.1f}%"
+        for label, results in (("Director", director_results), ("Actor", actor_results)):
+            if results:
+                percents = [r["completion"] * 100 for r in results]
+                print(
+                    dim(
+                        f"Debug: {label} completion range: "
+                        f"{min(percents):.1f}% - {max(percents):.1f}%"
+                    )
                 )
-            )
-        if actor_results:
-            actor_completions = [r["completion"] * 100 for r in actor_results]
-            print(
-                dim(
-                    f"Debug: Actor completion range: "
-                    f"{min(actor_completions):.1f}% - {max(actor_completions):.1f}%"
-                )
-            )
 
     # Filter results by threshold or names
     if filter_names:
@@ -1105,24 +958,14 @@ def analyze_sets(
         ]
 
     if debug:
-        completed = [r for r in filtered_results if r["completion"] == 1.0]
-        near_complete = [r for r in filtered_results if r["completion"] < 1.0]
-        completed_directors = [r for r in completed if r["type"] == "director"]
-        completed_actors = [r for r in completed if r["type"] == "actor"]
-        near_complete_directors = [r for r in near_complete if r["type"] == "director"]
-        near_complete_actors = [r for r in near_complete if r["type"] == "actor"]
-        print(
-            dim(
-                f"Debug: Completed: {len(completed_directors)} directors, "
-                f"{len(completed_actors)} actors"
+        counts = Counter((r["completion"] == 1.0, r["type"]) for r in filtered_results)
+        for done, label in ((True, "Completed"), (False, "Near-complete")):
+            print(
+                dim(
+                    f"Debug: {label}: {counts[done, 'director']} directors, "
+                    f"{counts[done, 'actor']} actors"
+                )
             )
-        )
-        print(
-            dim(
-                f"Debug: Near-complete: {len(near_complete_directors)} directors, "
-                f"{len(near_complete_actors)} actors"
-            )
-        )
 
     print()
     if filtered_results:
@@ -1285,7 +1128,7 @@ Examples:
         type=str,
         nargs="+",
         choices=list(TitleType.__members__),
-        default=[t.name for t in TitleType.default],  # type: ignore[attr-defined]
+        default=[t.name for t in DEFAULT_TITLE_TYPES],
         help="title types to consider",
     )
     filter_group.add_argument(

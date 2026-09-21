@@ -37,10 +37,7 @@ select = [
 # Ignore specific rules
 ignore = [
     "E501",    # Line too long (we have some long f-strings with Rich formatting)
-    "B023",    # Function doesn't bind loop variable (false positive with urllib callback)
-    "SIM113",  # Don't force enumerate when chunk_num tracking is clearer
-    "SIM117",  # Nested with statements are sometimes more readable
-    "PLR0915", # Too many statements (database conversion is inherently long)
+    "PLR0915", # Too many statements (analyze_sets drives the whole pipeline)
     "PLR0912", # Too many branches (analyze_sets has many display paths)
     "PLR0913", # Too many arguments (analyze_sets needs many config options)
     "PLR0917", # Too many positional arguments (same rationale as PLR0913)
