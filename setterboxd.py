@@ -332,7 +332,7 @@ def convert_to_sqlite(db_path: Path) -> None:
     cursor = conn.cursor()
 
     # Performance optimizations for bulk inserts
-    cursor.execute("PRAGMA journal_mode = WAL")  # Write-Ahead Logging for better concurrency
+    cursor.execute("PRAGMA journal_mode = OFF")  # Safe for a disposable one-time build
     cursor.execute("PRAGMA synchronous = OFF")  # Maximum speed (safe for one-time rebuild)
     cursor.execute("PRAGMA cache_size = -64000")  # 64MB cache
     cursor.execute("PRAGMA temp_store = MEMORY")  # Keep temp tables in memory
