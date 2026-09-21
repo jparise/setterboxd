@@ -601,10 +601,10 @@ def fetch_min_years_from_db(cursor: sqlite3.Cursor, titles: set[str]) -> dict[st
         f"""
         SELECT title, MIN(year) as min_year
         FROM titles
-        WHERE title IN ({sql_placeholders(titles)})
+        WHERE title_lower IN ({sql_placeholders(titles)})
         GROUP BY title
     """,
-        list(titles),
+        [normalize_title(title) for title in titles],
     )
 
     return dict(cursor.fetchall())
