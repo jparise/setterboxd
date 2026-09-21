@@ -415,17 +415,21 @@ def convert_to_sqlite(db_path: Path) -> None:
     print(f" ✓ {cursor.rowcount:,} relationships")
     title_ids.clear()
 
+    person_ids = {person_id for (person_id,) in cursor.execute("SELECT director_id FROM directors")}
+    person_ids.update(person_id for (person_id,) in cursor.execute("SELECT actor_id FROM actors"))
+
     print("→ Loading names...", end="", flush=True)
     name_rows = (
         (nconst, name)
         for nconst, name in read_imdb_tsv(data_dir / "names.tsv", cols=("nconst", "primaryName"))
-        if name and name != "\\N"
+        if nconst in person_ids and name and name != "\\N"
     )
 
     cursor.execute("CREATE TABLE names (name_id TEXT PRIMARY KEY, name TEXT)")
     cursor.executemany("INSERT INTO names VALUES (?,?)", name_rows)
     conn.commit()
     print(f" ✓ {cursor.rowcount:,} names")
+    person_ids.clear()
 
     indexes = [
         # Composite indexes for the most common query patterns. Each also serves
