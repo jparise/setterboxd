@@ -350,22 +350,28 @@ def convert_to_sqlite(db_path: Path) -> None:
         )
     """)
 
-    titles = []
-    for row in read_imdb_tsv(
-        data_dir / "basics.tsv",
-        cols=("tconst", "titleType", "primaryTitle", "originalTitle", "startYear"),
-    ):
-        tconst, title_type, primary_title, original_title, start_year = row
-        if title_type not in TitleType.__members__ or not primary_title or primary_title == "\\N":
-            continue
+    title_ids: set[str] = set()
 
-        try:
-            year = int(start_year) if start_year != "\\N" else None
-        except ValueError:
-            year = None
+    def title_rows() -> Iterator[tuple]:
+        for row in read_imdb_tsv(
+            data_dir / "basics.tsv",
+            cols=("tconst", "titleType", "primaryTitle", "originalTitle", "startYear"),
+        ):
+            tconst, title_type, primary_title, original_title, start_year = row
+            if (
+                title_type not in TitleType.__members__
+                or not primary_title
+                or primary_title == "\\N"
+            ):
+                continue
 
-        titles.append(
-            (
+            try:
+                year = int(start_year) if start_year != "\\N" else None
+            except ValueError:
+                year = None
+
+            title_ids.add(tconst)
+            yield (
                 tconst,
                 TitleType[title_type].value,
                 primary_title,
@@ -373,50 +379,53 @@ def convert_to_sqlite(db_path: Path) -> None:
                 normalize_title(original_title) if original_title != "\\N" else None,
                 year,
             )
-        )
 
-    cursor.executemany("INSERT INTO titles VALUES (?,?,?,?,?,?)", titles)
+    cursor.executemany("INSERT INTO titles VALUES (?,?,?,?,?,?)", title_rows())
     conn.commit()
-    print(f" ✓ {len(titles):,} titles")
-    title_ids = {title[0] for title in titles}
+    print(f" ✓ {cursor.rowcount:,} titles")
 
     print("→ Loading directors...", end="", flush=True)
-    directors = []
-    for tconst, director_ids in read_imdb_tsv(data_dir / "crew.tsv", cols=("tconst", "directors")):
-        if tconst in title_ids and director_ids and director_ids != "\\N":
-            directors.extend((director_id, tconst) for director_id in director_ids.split(","))
+    director_rows = (
+        (director_id, tconst)
+        for tconst, director_ids in read_imdb_tsv(
+            data_dir / "crew.tsv", cols=("tconst", "directors")
+        )
+        if tconst in title_ids and director_ids and director_ids != "\\N"
+        for director_id in director_ids.split(",")
+    )
 
     cursor.execute("CREATE TABLE directors (director_id TEXT, title_id TEXT)")
-    cursor.executemany("INSERT INTO directors VALUES (?,?)", directors)
+    cursor.executemany("INSERT INTO directors VALUES (?,?)", director_rows)
     conn.commit()
-    print(f" ✓ {len(directors):,} relationships")
+    print(f" ✓ {cursor.rowcount:,} relationships")
 
     print("→ Loading actors...", end="", flush=True)
     # Duplicates are rare and handled by queries, so skip deduplication.
-    actors = [
+    actor_rows = (
         (nconst, tconst)
         for tconst, nconst, category in read_imdb_tsv(
             data_dir / "principals.tsv", cols=("tconst", "nconst", "category")
         )
         if tconst in title_ids and category in ("actor", "actress")
-    ]
+    )
 
     cursor.execute("CREATE TABLE actors (actor_id TEXT, title_id TEXT)")
-    cursor.executemany("INSERT INTO actors VALUES (?,?)", actors)
+    cursor.executemany("INSERT INTO actors VALUES (?,?)", actor_rows)
     conn.commit()
-    print(f" ✓ {len(actors):,} relationships")
+    print(f" ✓ {cursor.rowcount:,} relationships")
+    title_ids.clear()
 
     print("→ Loading names...", end="", flush=True)
-    names = [
+    name_rows = (
         (nconst, name)
         for nconst, name in read_imdb_tsv(data_dir / "names.tsv", cols=("nconst", "primaryName"))
         if name and name != "\\N"
-    ]
+    )
 
     cursor.execute("CREATE TABLE names (name_id TEXT PRIMARY KEY, name TEXT)")
-    cursor.executemany("INSERT INTO names VALUES (?,?)", names)
+    cursor.executemany("INSERT INTO names VALUES (?,?)", name_rows)
     conn.commit()
-    print(f" ✓ {len(names):,} names")
+    print(f" ✓ {cursor.rowcount:,} names")
 
     indexes = [
         # Composite indexes for the most common query patterns. Each also serves
