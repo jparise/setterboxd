@@ -810,11 +810,21 @@ def analyze_person_type(
     min_watched: int,
     min_set_size: int,
     filters: Filters,
+    name_patterns: list[re.Pattern[str]],
 ) -> list[PersonResult]:
     """Analyze a person type (directors or actors) for completion."""
     candidates = collect_people_from_watched_movies(
         cursor, watched_tconsts, person_type, min_watched=min_watched, filters=filters
     )
+    if name_patterns:
+        candidates = {
+            person_id: person
+            for person_id, person in candidates.items()
+            if any(pattern.search(person["name"]) for pattern in name_patterns)
+        }
+    if not candidates:
+        return []
+
     filmographies = fetch_filmographies_bulk(cursor, candidates, person_type, filters, min_watched)
     return calculate_completion_results(candidates, filmographies, person_type.value, min_set_size)
 
@@ -833,6 +843,9 @@ def analyze_sets(
 ) -> list[PersonResult]:
     analyze_directors = only is None or only == "directors"
     analyze_actors = only is None or only == "actors"
+    name_patterns = [
+        re.compile(rf"\b{re.escape(name.strip())}\b", re.IGNORECASE) for name in filter_names or []
+    ]
 
     print(f"\n{bold(magenta('🎬 Letterboxd Set Analyzer'))}\n")
 
@@ -914,7 +927,15 @@ def analyze_sets(
                 watchlist_films.add(Film(match.title, match.year))
 
     director_results = (
-        analyze_person_type(cursor, PersonType.director, watched_tconsts, 3, min_set_size, filters)
+        analyze_person_type(
+            cursor,
+            PersonType.director,
+            watched_tconsts,
+            3,
+            min_set_size,
+            filters,
+            name_patterns,
+        )
         if analyze_directors
         else []
     )
@@ -923,7 +944,15 @@ def analyze_sets(
         print()
 
     actor_results = (
-        analyze_person_type(cursor, PersonType.actor, watched_tconsts, 5, min_set_size, filters)
+        analyze_person_type(
+            cursor,
+            PersonType.actor,
+            watched_tconsts,
+            5,
+            min_set_size,
+            filters,
+            name_patterns,
+        )
         if analyze_actors
         else []
     )
@@ -952,13 +981,8 @@ def analyze_sets(
                 )
 
     # Filter results by threshold or names
-    if filter_names:
-        name_patterns = [
-            re.compile(rf"\b{re.escape(name.strip())}\b", re.IGNORECASE) for name in filter_names
-        ]
-        filtered_results = [
-            r for r in all_results if any(pattern.search(r["name"]) for pattern in name_patterns)
-        ]
+    if name_patterns:
+        filtered_results = all_results
     else:
         threshold_min = threshold.min / 100
         threshold_max = threshold.max / 100
@@ -1034,11 +1058,12 @@ def analyze_sets(
             table_rows.append([type_icon, name_link, progress, titles_preview])
 
         print_table(headers, table_rows, col_widths)
+    elif name_patterns:
+        print(f"\n📊 {yellow('No sets found (filtered by name).')}\n")
     elif all_results:
-        filter_desc = "filtered by name" if filter_names else f"{threshold}%"
         max_completion = max(r["completion"] for r in all_results) * 100
         suggested_threshold = int(max_completion * 0.9)  # Suggest 90% of max
-        print(f"\n📊 {yellow(f'No sets found ({filter_desc}).')}")
+        print(f"\n📊 {yellow(f'No sets found ({threshold}%).')}")
         print(f"  {dim(f'Highest completion: {max_completion:.0f}%')}")
         print(f"  {dim(f'Try: --threshold {suggested_threshold}')}\n")
     else:
