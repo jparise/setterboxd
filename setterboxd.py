@@ -378,13 +378,13 @@ def convert_to_sqlite(db_path: Path) -> None:
     cursor.executemany("INSERT INTO titles VALUES (?,?,?,?,?,?)", titles)
     conn.commit()
     print(f" ✓ {len(titles):,} titles")
+    title_ids = {title[0] for title in titles}
 
     print("→ Loading directors...", end="", flush=True)
     directors = []
     for tconst, director_ids in read_imdb_tsv(data_dir / "crew.tsv", cols=("tconst", "directors")):
-        if not director_ids or director_ids == "\\N":
-            continue
-        directors.extend((director_id, tconst) for director_id in director_ids.split(","))
+        if tconst in title_ids and director_ids and director_ids != "\\N":
+            directors.extend((director_id, tconst) for director_id in director_ids.split(","))
 
     cursor.execute("CREATE TABLE directors (director_id TEXT, title_id TEXT)")
     cursor.executemany("INSERT INTO directors VALUES (?,?)", directors)
@@ -398,7 +398,7 @@ def convert_to_sqlite(db_path: Path) -> None:
         for tconst, nconst, category in read_imdb_tsv(
             data_dir / "principals.tsv", cols=("tconst", "nconst", "category")
         )
-        if category in ("actor", "actress")
+        if tconst in title_ids and category in ("actor", "actress")
     ]
 
     cursor.execute("CREATE TABLE actors (actor_id TEXT, title_id TEXT)")
