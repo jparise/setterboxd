@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 [dependency-groups]
 dev = [
     "ty",
-    "ruff>=0.14.1,<0.15",
+    "ruff>=0.14.1,<0.17",
 ]
 
 [tool.ruff]
