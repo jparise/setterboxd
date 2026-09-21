@@ -26,6 +26,7 @@ import traceback
 import urllib.request
 from collections import Counter, defaultdict
 from collections.abc import Iterator, Sized
+from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -1108,7 +1109,7 @@ Examples:
     parser.add_argument(
         "file",
         nargs="?",
-        type=argparse.FileType("r"),
+        type=Path,
         help="path to watched.csv from your Letterboxd data export",
     )
     parser.add_argument(
@@ -1171,7 +1172,7 @@ Examples:
     )
     filter_group.add_argument(
         "--watchlist",
-        type=argparse.FileType("r"),
+        type=Path,
         metavar="file",
         help="path to watchlist.csv to prioritize unwatched films",
     )
@@ -1229,18 +1230,27 @@ Examples:
     )
 
     try:
-        analyze_sets(
-            watched_file=args.file,
-            min_set_size=args.min_titles,
-            threshold=args.threshold,
-            only=args.only,
-            max_results=args.limit,
-            debug=args.debug,
-            filters=filters,
-            db_path=db_path,
-            watchlist_file=args.watchlist,
-            filter_names=args.name,
-        )
+        with ExitStack() as stack:
+            try:
+                watched_file = stack.enter_context(args.file.open())
+                watchlist_file = (
+                    stack.enter_context(args.watchlist.open()) if args.watchlist else None
+                )
+            except OSError as error:
+                parser.error(str(error))
+
+            analyze_sets(
+                watched_file=watched_file,
+                min_set_size=args.min_titles,
+                threshold=args.threshold,
+                only=args.only,
+                max_results=args.limit,
+                debug=args.debug,
+                filters=filters,
+                db_path=db_path,
+                watchlist_file=watchlist_file,
+                filter_names=args.name,
+            )
     except KeyboardInterrupt:
         print(f"\n{yellow('Analysis interrupted by user.')}")
         sys.exit(0)
