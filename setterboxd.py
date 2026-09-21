@@ -434,10 +434,10 @@ def convert_to_sqlite(db_path: Path) -> None:
         ("idx_titles_original_title_year", "titles(original_title_lower, year)"),
         ("idx_titles_type_year", "titles(title_type, year)"),
         # Junction table indexes
-        ("idx_directors_title", "directors(title_id)"),
-        ("idx_directors_director", "directors(director_id)"),
-        ("idx_actors_actor", "actors(actor_id)"),
-        ("idx_actors_title", "actors(title_id)"),
+        ("idx_directors_title", "directors(title_id, director_id)"),
+        ("idx_directors_director", "directors(director_id, title_id)"),
+        ("idx_actors_actor", "actors(actor_id, title_id)"),
+        ("idx_actors_title", "actors(title_id, actor_id)"),
     ]
 
     print("→ Creating indexes...", end="", flush=True)
