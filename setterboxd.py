@@ -156,13 +156,15 @@ IMDB_DATASETS: dict[str, str] = {
     "principals": "https://datasets.imdbws.com/title.principals.tsv.gz",
     "names": "https://datasets.imdbws.com/name.basics.tsv.gz",
 }
+LETTERBOXD_SLUG_COLLISIONS = frozenset({"tt31049299"})
 
 
 class Film(NamedTuple):
-    """A film with its title and release year"""
+    """A film with its title, release year, and IMDb ID."""
 
     title: str
     year: int
+    tconst: str
 
 
 class Person(TypedDict):
@@ -616,7 +618,10 @@ def fetch_min_years_from_db(cursor: sqlite3.Cursor, titles: set[str]) -> dict[st
 
 
 def film_to_letterboxd_url(
-    title: str, year: int | None = None, min_year_for_title: int | None = None
+    title: str,
+    year: int | None = None,
+    min_year_for_title: int | None = None,
+    tconst: str | None = None,
 ) -> str:
     """Convert a film title to a Letterboxd URL with clickable link markup.
 
@@ -626,6 +631,8 @@ def film_to_letterboxd_url(
     slug = slugify(title)
     if year and min_year_for_title and year > min_year_for_title:
         slug = f"{slug}-{year}"
+    if tconst in LETTERBOXD_SLUG_COLLISIONS:
+        slug += "-2"
     url = f"https://letterboxd.com/film/{slug}/"
     return linkify(url, title)
 
@@ -669,7 +676,7 @@ def format_title_list(
     # Apply linkification to the films we're showing, with bold for watchlist films
     film_links = []
     for film in sorted_films[:count]:
-        url = film_to_letterboxd_url(film.title, film.year, min_years.get(film.title))
+        url = film_to_letterboxd_url(film.title, film.year, min_years.get(film.title), film.tconst)
         if film in watchlist_films:
             # Wrap in bold
             url = bold(url)
@@ -706,7 +713,7 @@ def collect_people_from_watched_movies(
     print(f"Collecting {person_type.value}s from watched titles...", end="", flush=True)
     cursor.execute(
         f"""
-        SELECT t.{id_column}, n.name, m.title, m.year
+        SELECT t.{id_column}, n.name, m.tconst, m.title, m.year
         FROM {person_type.table_name} t
         JOIN names n ON t.{id_column} = n.name_id
         JOIN titles m ON t.title_id = m.tconst
@@ -719,11 +726,11 @@ def collect_people_from_watched_movies(
     # Build dict of people by ID directly
     people_by_id: dict[str, Person] = {}
     people_names: set[str] = set()
-    for person_id, person_name, movie_title, movie_year in cursor.fetchall():
+    for person_id, person_name, tconst, movie_title, movie_year in cursor.fetchall():
         people_names.add(person_name)
         if person_id not in people_by_id:
             people_by_id[person_id] = {"name": person_name, "watched": set()}
-        people_by_id[person_id]["watched"].add(Film(movie_title, movie_year))
+        people_by_id[person_id]["watched"].add(Film(movie_title, movie_year, tconst))
     print(f" ✓ {green(f'({len(people_names)} {person_type.value}s)')}")
 
     # Filter to people worth analyzing
@@ -748,7 +755,7 @@ def fetch_filmographies_bulk(
 
     cursor.execute(
         f"""
-        SELECT t.{id_column}, m.title, m.year
+        SELECT t.{id_column}, m.tconst, m.title, m.year
         FROM {person_type.table_name} t
         JOIN titles m ON t.title_id = m.tconst
         WHERE t.{id_column} IN ({sql_placeholders(candidates)})
@@ -758,8 +765,8 @@ def fetch_filmographies_bulk(
     )
 
     filmographies = defaultdict(set)
-    for person_id, title, year in cursor.fetchall():
-        filmographies[person_id].add(Film(title, year))
+    for person_id, tconst, title, year in cursor.fetchall():
+        filmographies[person_id].add(Film(title, year, tconst))
     print(f" ✓ {green(f'({len(filmographies)} {person_type.value}s with {min_watched}+ watched)')}")
 
     return filmographies
@@ -929,7 +936,7 @@ def analyze_sets(
             except (ValueError, KeyError):
                 year = None
             if match := match_movie_sqlite(conn, title, year, filters):
-                watchlist_films.add(Film(match.title, match.year))
+                watchlist_films.add(Film(match.title, match.year, match.tconst))
 
     director_results = (
         analyze_person_type(
